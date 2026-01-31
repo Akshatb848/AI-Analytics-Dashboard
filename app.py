@@ -2715,7 +2715,7 @@ def main():
                 
                 st.markdown(f"""
                 <div class="metric-card">
-                    <div class="metric-value">{format_number(metric['value'])}</div>
+                    <div class="metric-value">{metric['value']:,.0f}</div>
                     <div class="metric-label">{metric['label']}</div>
                     <div class="{delta_class}">{delta_symbol} {abs(metric['delta']):.1f}%</div>
                 </div>
