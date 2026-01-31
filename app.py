@@ -11,7 +11,6 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from prophet import Prophet
 from datetime import datetime, timedelta
-import json
 import re
 from typing import Optional, Tuple, List, Dict, Any
 import warnings
@@ -1532,19 +1531,19 @@ def main():
         with col2:
             # Summary report
             summary = {
-                'Total Rows': len(df),
-                'Total Columns': len(df.columns),
-                'Numeric Columns': len(numeric_cols),
-                'Categorical Columns': len(categorical_cols),
-                'Date Column': date_col or 'Not detected',
-                'Missing Values': df.isnull().sum().sum()
+                'Total Rows': int(len(df)),
+                'Total Columns': int(len(df.columns)),
+                'Numeric Columns': int(len(numeric_cols)),
+                'Categorical Columns': int(len(categorical_cols)),
+                'Date Column': date_col if date_col else "Not detected",
+                'Missing Values': int(df.isnull().sum().sum())
             }
             
             st.download_button(
-                "📥 Download Summary Report (JSON)",
-                json.dumps(summary, indent=2),
-                "summary_report.json",
-                "application/json"
+                label="📥 Download Summary Report (JSON)",
+                data=summary_json,
+                file_name="summary_report.json",
+                mime="application/json"
             )
     
     # Footer
