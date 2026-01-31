@@ -1530,19 +1530,19 @@ def main():
             )
         
         with col2:
-            # Summary report
+            # Summary report - convert to native Python types for JSON serialization
             summary = {
-                'Total Rows': len(df),
-                'Total Columns': len(df.columns),
-                'Numeric Columns': len(numeric_cols),
-                'Categorical Columns': len(categorical_cols),
-                'Date Column': date_col or 'Not detected',
-                'Missing Values': df.isnull().sum().sum()
+                'Total Rows': int(len(df)),
+                'Total Columns': int(len(df.columns)),
+                'Numeric Columns': int(len(numeric_cols)),
+                'Categorical Columns': int(len(categorical_cols)),
+                'Date Column': date_col if date_col else 'Not detected',
+                'Missing Values': int(df.isnull().sum().sum())
             }
             
             st.download_button(
                 "📥 Download Summary Report (JSON)",
-                json.dumps(summary, indent=2),
+                json.dumps(summary, indent=2, default=str),
                 "summary_report.json",
                 "application/json"
             )
