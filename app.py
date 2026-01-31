@@ -620,6 +620,36 @@ st.markdown("""
 # HELPER FUNCTIONS
 # =============================================================================
 
+def sanitize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+
+    # Drop empty rows & columns
+    df.dropna(axis=0, how="all", inplace=True)
+    df.dropna(axis=1, how="all", inplace=True)
+
+    for col in df.columns:
+        if df[col].dtype == "object":
+            df[col] = (
+                df[col]
+                .astype(str)
+                .str.replace(",", "", regex=False)
+                .str.replace("₹", "", regex=False)
+                .str.replace("%", "", regex=False)
+                .str.replace("—", "", regex=False)
+                .str.strip()
+            )
+
+            # Try numeric conversion
+            df[col] = pd.to_numeric(df[col], errors="ignore")
+
+            # Try datetime conversion
+            try:
+                df[col] = pd.to_datetime(df[col], errors="ignore")
+            except:
+                pass
+
+    return df
+
 def format_number(num: float) -> str:
     """Format numbers for display."""
     if pd.isna(num):
@@ -2543,6 +2573,7 @@ def main():
                     try:
                         if file.name.endswith('.csv'):
                             temp_df = pd.read_csv(file)
+                            temp_df = sanitize_dataframe(temp_df)
                         else:
                             # Excel with multiple sheets
                             excel_file = pd.ExcelFile(file)
@@ -2671,7 +2702,11 @@ def main():
         st.markdown("### 📊 Key Performance Metrics")
         
         metrics = viz_builder.create_overview_metrics()
-        cols = st.columns(len(metrics))
+        if len(metrics) == 0:
+            st.info("ℹ️ No numeric KPIs detected in this dataset.")
+        else:
+            cols = st.columns(min(len(metrics), 4))
+
         
         for col, metric in zip(cols, metrics):
             with col:
