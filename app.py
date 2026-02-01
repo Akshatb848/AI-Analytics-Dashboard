@@ -3,7 +3,11 @@ AI Analytics Dashboard v2.0 - Enterprise Edition
 Alternative to Tableau AI / Power BI Copilot
 Features: LLM-powered queries, narrative insights, drill-down dashboards, multi-dataset support
 """
-
+from semantic_engine import (
+    DatasetProfiler,
+    SemanticClassifier,
+    MetricIntelligenceEngine
+)
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -2569,14 +2573,19 @@ def main():
             )
             
             if uploaded_files:
+                all_datasets = []
+
                 for file in uploaded_files:
                     try:
-                        if file.name.endswith('.csv'):
+                        # ==============================
+                        # LOAD FILE
+                        # ==============================
+                        if file.name.lower().endswith(".csv"):
                             temp_df = pd.read_csv(file)
-                            temp_df = sanitize_dataframe(temp_df)
+
                         else:
-                            # Excel with multiple sheets
                             excel_file = pd.ExcelFile(file)
+
                             if len(excel_file.sheet_names) > 1:
                                 sheet = st.selectbox(
                                     f"Select sheet from {file.name}",
@@ -2586,17 +2595,66 @@ def main():
                                 temp_df = pd.read_excel(file, sheet_name=sheet)
                             else:
                                 temp_df = pd.read_excel(file)
-                        
-                        # Store in session state
-                        dataset_name = file.name.rsplit('.', 1)[0]
-                        st.session_state.datasets[dataset_name] = temp_df
-                        
-                        if st.session_state.active_dataset is None:
-                            st.session_state.active_dataset = dataset_name
-                        
-                        st.success(f"✅ Loaded {dataset_name}: {len(temp_df):,} rows")
+
+                        # ==============================
+                        # SANITIZE DATAFRAME
+                        # ==============================
+                        temp_df = sanitize_dataframe(temp_df)
+
+                        # ==============================
+                        # SEMANTIC ENGINE (CORE BI)
+                        # ==============================
+                        profiler = DatasetProfiler(temp_df)
+                        profiles = profiler.profile()
+
+                        semantic = SemanticClassifier(profiles).classify()
+
+                        kpis = MetricIntelligenceEngine(temp_df, semantic).discover_kpis()
+
+                        # ==============================
+                        # STORE DATASET
+                        # ==============================
+                        all_datasets.append({
+                            "file_name": file.name,
+                            "df": temp_df,
+                            "semantic": semantic,
+                            "kpis": kpis,
+                            "profiles": profiles
+                        })
+
+                        st.success(
+                            f"✅ {file.name} loaded successfully | "
+                            f"KPIs: {len(kpis)} | "
+                            f"Time columns: {len(semantic.time_columns)}"
+                        )
+
                     except Exception as e:
-                        st.error(f"Error loading {file.name}: {e}")
+                        st.error(f"❌ Failed to load {file.name}: {str(e)}")
+
+                # ==============================
+                # SELECT ACTIVE DATASET
+                # ==============================
+                if all_datasets:
+                    selected_dataset = st.selectbox(
+                        "Select dataset",
+                        [d["file_name"] for d in all_datasets]
+                    )
+
+                    dataset = next(
+                        d for d in all_datasets if d["file_name"] == selected_dataset
+                    )
+
+                    df = dataset["df"]
+                    semantic = dataset["semantic"]
+                    kpis = dataset["kpis"]
+                    profiles = dataset["profiles"]
+                    
+                    st.success(f"✅ Loaded {selected_dataset}: {len(dataset['df']):,} rows")
+                    
+                    # Store in session state
+                    st.session_state.datasets[selected_dataset] = dataset["df"]
+                    if st.session_state.active_dataset is None:
+                        st.session_state.active_dataset = selected_dataset
             
             # Dataset selector if multiple datasets
             if len(st.session_state.datasets) > 1:
