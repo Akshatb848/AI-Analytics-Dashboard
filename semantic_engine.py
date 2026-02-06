@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
-from dataclasses import dataclass
-from typing import List, Dict, Optional, Tuple
+from dataclasses import dataclass, field
+from typing import List, Dict, Optional, Tuple, Any
 
 # ======================================================
 # COLUMN PROFILE
@@ -135,3 +135,82 @@ class ForecastEligibilityEngine:
             return False, "Highly volatile series"
 
         return True, "Forecast eligible"
+
+
+# ======================================================
+# SEMANTIC CATALOG
+# ======================================================
+
+@dataclass
+class MetricDefinition:
+    name: str
+    column: str
+    aggregation: str = "sum"
+    format: str = "number"
+    description: str = ""
+    unit: str = ""
+
+
+@dataclass
+class SemanticCatalog:
+    metrics: List[MetricDefinition] = field(default_factory=list)
+    dimensions: List[str] = field(default_factory=list)
+    time_column: Optional[str] = None
+    hierarchies: Dict[str, List[str]] = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, payload: Dict[str, Any]) -> "SemanticCatalog":
+        metrics_payload = payload.get("metrics", [])
+        metrics = [
+            MetricDefinition(
+                name=item.get("name", item.get("column", "")),
+                column=item.get("column", ""),
+                aggregation=item.get("aggregation", "sum"),
+                format=item.get("format", "number"),
+                description=item.get("description", ""),
+                unit=item.get("unit", "")
+            )
+            for item in metrics_payload
+        ]
+        return cls(
+            metrics=metrics,
+            dimensions=payload.get("dimensions", []),
+            time_column=payload.get("time_column"),
+            hierarchies=payload.get("hierarchies", {})
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "metrics": [
+                {
+                    "name": m.name,
+                    "column": m.column,
+                    "aggregation": m.aggregation,
+                    "format": m.format,
+                    "description": m.description,
+                    "unit": m.unit
+                }
+                for m in self.metrics
+            ],
+            "dimensions": self.dimensions,
+            "time_column": self.time_column,
+            "hierarchies": self.hierarchies
+        }
+
+    def validate(self, df: pd.DataFrame) -> List[str]:
+        issues = []
+        columns = set(df.columns)
+        for metric in self.metrics:
+            if not metric.column:
+                issues.append(f"Metric '{metric.name}' is missing a column mapping.")
+            elif metric.column not in columns:
+                issues.append(f"Metric '{metric.name}' column '{metric.column}' not found.")
+        for dim in self.dimensions:
+            if dim not in columns:
+                issues.append(f"Dimension '{dim}' not found in dataset.")
+        if self.time_column and self.time_column not in columns:
+            issues.append(f"Time column '{self.time_column}' not found in dataset.")
+        return issues
+
+    def metric_columns(self) -> List[str]:
+        return [m.column for m in self.metrics if m.column]
