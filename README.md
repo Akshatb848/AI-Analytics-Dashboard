@@ -33,6 +33,16 @@ A comprehensive analytics platform featuring automated insights, predictive anal
 - Support for aggregations, filters, and comparisons
 - Example queries for guidance
 
+### 🧠 **Semantic Catalog (Governed Metrics)**
+- Upload a JSON semantic catalog to define metrics, dimensions, and time grains
+- Standardize KPIs across dashboards with consistent definitions
+- Validation feedback for missing columns and mappings
+
+### 🗂️ **Executive Dashboard Studio**
+- Save AI insights and charts as reusable dashboard cards
+- Curate stakeholder-ready summaries from natural language analysis
+- Manage and remove cards directly within the app
+
 ### 📋 **Data Explorer**
 - Interactive data preview
 - Column statistics and summaries

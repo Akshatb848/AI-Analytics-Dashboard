@@ -6,7 +6,8 @@ Features: LLM-powered queries, narrative insights, drill-down dashboards, multi-
 from semantic_engine import (
     DatasetProfiler,
     SemanticClassifier,
-    MetricIntelligenceEngine
+    MetricIntelligenceEngine,
+    SemanticCatalog
 )
 import streamlit as st
 import pandas as pd
@@ -46,7 +47,7 @@ if 'active_dataset' not in st.session_state:
 if 'filters' not in st.session_state:
     st.session_state.filters = {}
 if 'saved_dashboards' not in st.session_state:
-    st.session_state.saved_dashboards = {}
+    st.session_state.saved_dashboards = []
 if 'query_history' not in st.session_state:
     st.session_state.query_history = []
 if 'show_tutorial' not in st.session_state:
@@ -55,6 +56,12 @@ if 'chart_theme' not in st.session_state:
     st.session_state.chart_theme = 'default'
 if 'color_palette' not in st.session_state:
     st.session_state.color_palette = 'viridis'
+if 'semantic_catalog' not in st.session_state:
+    st.session_state.semantic_catalog = None
+if 'semantic_issues' not in st.session_state:
+    st.session_state.semantic_issues = []
+if 'semantic_schema' not in st.session_state:
+    st.session_state.semantic_schema = None
 
 # =============================================================================
 # ENHANCED CUSTOM STYLING
@@ -722,6 +729,64 @@ def calculate_data_quality_score(df: pd.DataFrame) -> Dict[str, Any]:
         'duplicate_rows': int(duplicate_rows),
         'total_rows': len(df),
         'total_columns': len(df.columns)
+    }
+
+
+def semantic_catalog_template() -> Dict[str, Any]:
+    return {
+        "time_column": "date",
+        "dimensions": ["region", "category", "segment"],
+        "metrics": [
+            {
+                "name": "Revenue",
+                "column": "revenue",
+                "aggregation": "sum",
+                "format": "currency",
+                "description": "Net revenue after discounts",
+                "unit": "USD"
+            },
+            {
+                "name": "Profit",
+                "column": "profit",
+                "aggregation": "sum",
+                "format": "currency",
+                "description": "Gross profit",
+                "unit": "USD"
+            }
+        ],
+        "hierarchies": {
+            "region": ["country", "state", "city"]
+        }
+    }
+
+
+def load_semantic_catalog(payload: Dict[str, Any], df: pd.DataFrame) -> None:
+    catalog = SemanticCatalog.from_dict(payload)
+    st.session_state.semantic_catalog = catalog
+    st.session_state.semantic_issues = catalog.validate(df)
+
+
+def resolve_semantic_schema(df: pd.DataFrame) -> Dict[str, Any]:
+    catalog = st.session_state.semantic_catalog
+    if not catalog:
+        return {
+            "numeric_cols": detect_numeric_columns(df),
+            "categorical_cols": detect_categorical_columns(df),
+            "date_col": detect_date_column(df),
+            "metric_definitions": []
+        }
+
+    metric_columns = [col for col in catalog.metric_columns() if col in df.columns]
+    numeric_cols = metric_columns if metric_columns else detect_numeric_columns(df)
+    dimensions = [col for col in catalog.dimensions if col in df.columns]
+    categorical_cols = dimensions if dimensions else detect_categorical_columns(df)
+    date_col = catalog.time_column if catalog.time_column in df.columns else detect_date_column(df)
+
+    return {
+        "numeric_cols": numeric_cols,
+        "categorical_cols": categorical_cols,
+        "date_col": date_col,
+        "metric_definitions": catalog.metrics
     }
 
 
@@ -1441,11 +1506,17 @@ class SmartQueryEngine:
     Currently uses advanced pattern matching with fallback to smart defaults.
     """
     
-    def __init__(self, df: pd.DataFrame):
+    def __init__(
+        self,
+        df: pd.DataFrame,
+        numeric_cols: Optional[List[str]] = None,
+        categorical_cols: Optional[List[str]] = None,
+        date_col: Optional[str] = None
+    ):
         self.df = df
-        self.numeric_cols = detect_numeric_columns(df)
-        self.categorical_cols = detect_categorical_columns(df)
-        self.date_col = detect_date_column(df)
+        self.numeric_cols = numeric_cols or detect_numeric_columns(df)
+        self.categorical_cols = categorical_cols or detect_categorical_columns(df)
+        self.date_col = date_col or detect_date_column(df)
         self.schema = self._build_schema()
         
         # Enhanced patterns for better query understanding
@@ -2110,21 +2181,35 @@ class VisualizationBuilder:
         'turbo': px.colors.sequential.Turbo
     }
     
-    def __init__(self, df: pd.DataFrame, color_palette: str = 'viridis'):
+    def __init__(
+        self,
+        df: pd.DataFrame,
+        color_palette: str = 'viridis',
+        numeric_cols: Optional[List[str]] = None,
+        categorical_cols: Optional[List[str]] = None,
+        date_col: Optional[str] = None,
+        metric_definitions: Optional[List[Any]] = None
+    ):
         self.df = df
-        self.numeric_cols = detect_numeric_columns(df)
-        self.categorical_cols = detect_categorical_columns(df)
-        self.date_col = detect_date_column(df)
+        self.numeric_cols = numeric_cols or detect_numeric_columns(df)
+        self.categorical_cols = categorical_cols or detect_categorical_columns(df)
+        self.date_col = date_col or detect_date_column(df)
         self.color_palette = color_palette
+        self.metric_definitions = metric_definitions or []
     
     def create_overview_metrics(self) -> List[Dict[str, Any]]:
         metrics = []
-        priority_cols = ['sales', 'revenue', 'profit', 'quantity', 'amount']
-        cols_to_use = [c for c in priority_cols if c in self.numeric_cols]
-        cols_to_use.extend([c for c in self.numeric_cols if c not in cols_to_use])
+        if self.metric_definitions:
+            cols_to_use = [m.column for m in self.metric_definitions if m.column in self.numeric_cols]
+        else:
+            priority_cols = ['sales', 'revenue', 'profit', 'quantity', 'amount']
+            cols_to_use = [c for c in priority_cols if c in self.numeric_cols]
+            cols_to_use.extend([c for c in self.numeric_cols if c not in cols_to_use])
         
         for col in cols_to_use[:4]:
-            is_cumulative = any(k in col.lower() for k in ['sales', 'revenue', 'profit', 'quantity', 'amount', 'total', 'cost'])
+            definition = next((m for m in self.metric_definitions if m.column == col), None)
+            agg = definition.aggregation if definition else 'sum'
+            is_cumulative = agg in ['sum', 'total']
             current = self.df[col].sum() if is_cumulative else self.df[col].mean()
             
             half = len(self.df) // 2
@@ -2132,7 +2217,7 @@ class VisualizationBuilder:
             delta = ((current - prev) / abs(prev)) * 100 if prev != 0 else 0
             
             metrics.append({
-                'label': col.replace('_', ' ').title(),
+                'label': definition.name if definition else col.replace('_', ' ').title(),
                 'value': current,
                 'delta': delta
             })
@@ -2682,7 +2767,37 @@ def main():
                     df[col] = pd.to_datetime(df[col])
                 except:
                     pass
-        
+
+        st.markdown("---")
+        st.markdown("### 🧠 Semantic Catalog")
+        with st.expander("Load governed metrics & dimensions"):
+            st.caption("Upload a semantic catalog to standardize metrics, dimensions, and time grains.")
+            catalog_file = st.file_uploader(
+                "Semantic catalog (JSON)",
+                type=["json"],
+                key="semantic_catalog_uploader"
+            )
+            template_payload = semantic_catalog_template()
+            st.download_button(
+                "⬇️ Download template",
+                data=json.dumps(template_payload, indent=2),
+                file_name="semantic_catalog_template.json",
+                mime="application/json"
+            )
+
+            if catalog_file is not None:
+                try:
+                    payload = json.load(catalog_file)
+                    load_semantic_catalog(payload, df)
+                    if st.session_state.semantic_issues:
+                        st.warning("⚠️ Semantic catalog loaded with issues:")
+                        for issue in st.session_state.semantic_issues:
+                            st.write(f"• {issue}")
+                    else:
+                        st.success("✅ Semantic catalog applied successfully.")
+                except json.JSONDecodeError:
+                    st.error("❌ Invalid JSON. Please check the catalog format.")
+
         st.markdown("---")
         
         # Data Quality Score
@@ -2705,9 +2820,12 @@ def main():
         st.markdown("---")
         
         # Quick Stats
-        date_col = detect_date_column(df)
-        numeric_cols = detect_numeric_columns(df)
-        categorical_cols = detect_categorical_columns(df)
+        semantic_schema = resolve_semantic_schema(df)
+        date_col = semantic_schema["date_col"]
+        numeric_cols = semantic_schema["numeric_cols"]
+        categorical_cols = semantic_schema["categorical_cols"]
+        metric_definitions = semantic_schema["metric_definitions"]
+        st.session_state.semantic_schema = semantic_schema
         
         col1, col2 = st.columns(2)
         with col1:
@@ -2739,19 +2857,33 @@ def main():
     # Tutorial
     if st.session_state.show_tutorial:
         render_tutorial()
+
+    semantic_schema = st.session_state.semantic_schema or resolve_semantic_schema(df)
+    date_col = semantic_schema["date_col"]
+    numeric_cols = semantic_schema["numeric_cols"]
+    categorical_cols = semantic_schema["categorical_cols"]
+    metric_definitions = semantic_schema["metric_definitions"]
     
     # Main Tabs
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
         "📊 Overview",
         "🔍 Insights",
         "📈 Predictions",
         "💬 Ask Data",
         "🔧 Data Tools",
-        "📄 Reports"
+        "📄 Reports",
+        "🗂️ Dashboards"
     ])
     
     # Initialize engines
-    viz_builder = VisualizationBuilder(df, st.session_state.color_palette)
+    viz_builder = VisualizationBuilder(
+        df,
+        st.session_state.color_palette,
+        numeric_cols=numeric_cols,
+        categorical_cols=categorical_cols,
+        date_col=date_col,
+        metric_definitions=metric_definitions
+    )
     
     # =========================================================================
     # TAB 1: OVERVIEW
@@ -2805,7 +2937,14 @@ def main():
             
             if active_filters:
                 st.info(f"Showing {len(df_filtered):,} of {len(df):,} records")
-                viz_builder = VisualizationBuilder(df_filtered, st.session_state.color_palette)
+                viz_builder = VisualizationBuilder(
+                    df_filtered,
+                    st.session_state.color_palette,
+                    numeric_cols=numeric_cols,
+                    categorical_cols=categorical_cols,
+                    date_col=date_col,
+                    metric_definitions=metric_definitions
+                )
         
         # Charts
         col1, col2 = st.columns(2)
@@ -2986,7 +3125,12 @@ def main():
         
         if query:
             with st.spinner("🔍 Processing..."):
-                query_engine = SmartQueryEngine(df)
+                query_engine = SmartQueryEngine(
+                    df,
+                    numeric_cols=numeric_cols,
+                    categorical_cols=categorical_cols,
+                    date_col=date_col
+                )
                 result = query_engine.process_query(query)
                 
                 st.markdown(result['text'])
@@ -3009,6 +3153,27 @@ def main():
                     st.markdown("**Follow-up questions:**")
                     for sugg in result['follow_up_suggestions'][:3]:
                         st.markdown(f"• {sugg}")
+
+                if result.get('figure') is not None or isinstance(result.get('data'), pd.DataFrame):
+                    st.markdown("---")
+                    st.markdown("### 🗂️ Save to Dashboard")
+                    query_hash = hashlib.md5(query.encode()).hexdigest()[:8]
+                    default_title = f"Insight: {query[:45]}{'...' if len(query) > 45 else ''}"
+                    card_title = st.text_input(
+                        "Dashboard card title",
+                        value=default_title,
+                        key=f"dash_title_{query_hash}"
+                    )
+                    if st.button("Save card", key=f"save_card_{query_hash}"):
+                        st.session_state.saved_dashboards.append({
+                            "title": card_title,
+                            "query": query,
+                            "summary": result.get("narrative", ""),
+                            "text": result.get("text", ""),
+                            "figure": result.get("figure"),
+                            "data": result.get("data")
+                        })
+                        st.success("✅ Added to Dashboards tab.")
     
     # =========================================================================
     # TAB 5: DATA TOOLS
@@ -3164,6 +3329,37 @@ def main():
                 "application/json",
                 use_container_width=True
             )
+
+    # =========================================================================
+    # TAB 7: DASHBOARDS
+    # =========================================================================
+    with tab7:
+        st.markdown("### 🗂️ Executive Dashboards")
+        st.caption("Curate AI-generated cards for stakeholder-ready dashboards.")
+
+        if not st.session_state.saved_dashboards:
+            st.info("No dashboard cards yet. Save insights from the Ask Data tab.")
+        else:
+            for idx, card in enumerate(st.session_state.saved_dashboards):
+                with st.expander(f"{idx + 1}. {card['title']}"):
+                    st.caption(f"Query: {card['query']}")
+                    if card.get("text"):
+                        st.markdown(card["text"])
+                    if card.get("summary"):
+                        st.markdown(f"""
+                        <div class="narrative-card">
+                            <h4>💡 Business Insight</h4>
+                            <p>{card['summary']}</p>
+                        </div>
+                        """, unsafe_allow_html=True)
+                    if card.get("figure") is not None:
+                        st.plotly_chart(card["figure"], use_container_width=True)
+                    if isinstance(card.get("data"), pd.DataFrame) and len(card["data"]) > 0:
+                        st.dataframe(card["data"], use_container_width=True, hide_index=True)
+
+                    if st.button("Remove card", key=f"remove_card_{idx}"):
+                        st.session_state.saved_dashboards.pop(idx)
+                        st.experimental_rerun()
     
     # Footer
     st.markdown("""
