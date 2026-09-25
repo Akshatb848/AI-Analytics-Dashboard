@@ -4,8 +4,8 @@
 
 A comprehensive analytics platform featuring automated insights, predictive analytics, and natural language queries—powered by Prophet, Plotly, and Streamlit.
 
-![Python](https://img.shields.io/badge/Python-3.9+-blue)
-![Streamlit](https://img.shields.io/badge/Streamlit-1.28+-red)
+![Python](https://img.shields.io/badge/Python-3.11+-blue)
+![Streamlit](https://img.shields.io/badge/Streamlit-1.64-red)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
 ---
@@ -82,6 +82,17 @@ pip install -r requirements.txt
 # Run the app
 streamlit run app.py
 ```
+
+Dependencies in `requirements.txt` are pinned to the versions the app is tested against, which require Python 3.11 or newer.
+
+### Running Tests
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+
+The suite in `tests/` runs the app headlessly with Streamlit's `AppTest` (sample data, Ask Data queries, forecasting, Data Tools, Dashboards) and unit-tests the data cleaning helpers.
 
 ### Using Google Colab
 
@@ -179,7 +190,7 @@ print(f"Access your app at: {public_url}")
    colorFrom: indigo
    colorTo: green
    sdk: streamlit
-   sdk_version: 1.28.0
+   sdk_version: 1.64.0
    app_file: app.py
    pinned: false
    ---
@@ -197,7 +208,10 @@ print(f"Access your app at: {public_url}")
 ```
 ai-analytics-dashboard/
 ├── app.py                 # Main Streamlit application
-├── requirements.txt       # Python dependencies
+├── semantic_engine.py     # Column profiling and semantic catalog
+├── requirements.txt       # Python dependencies (pinned)
+├── requirements-dev.txt   # Test dependencies
+├── tests/                 # Smoke and unit tests
 ├── .streamlit/
 │   └── config.toml       # Streamlit configuration
 ├── README.md             # Documentation
