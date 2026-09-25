@@ -271,6 +271,9 @@ ai-analytics-dashboard/
 |----------|-------------|---------|
 | `STREAMLIT_SERVER_PORT` | Server port | 8501 |
 | `STREAMLIT_SERVER_HEADLESS` | Headless mode | true |
+| `MAX_UPLOAD_ROWS` | Maximum rows read from an uploaded file; larger files are truncated with a warning | 200000 |
+
+Uploads are limited to 50 MB via `server.maxUploadSize` in `.streamlit/config.toml`.
 
 ### Custom Theming
 

@@ -159,7 +159,21 @@ class SemanticCatalog:
 
     @classmethod
     def from_dict(cls, payload: Dict[str, Any]) -> "SemanticCatalog":
+        """Build a catalog from parsed JSON, raising ValueError if its shape is wrong."""
+        if not isinstance(payload, dict):
+            raise ValueError("the catalog must be a JSON object")
         metrics_payload = payload.get("metrics", [])
+        if not isinstance(metrics_payload, list) or not all(isinstance(m, dict) for m in metrics_payload):
+            raise ValueError("'metrics' must be a list of objects")
+        dimensions = payload.get("dimensions", [])
+        if not isinstance(dimensions, list) or not all(isinstance(d, str) for d in dimensions):
+            raise ValueError("'dimensions' must be a list of column names")
+        time_column = payload.get("time_column")
+        if time_column is not None and not isinstance(time_column, str):
+            raise ValueError("'time_column' must be a column name")
+        hierarchies = payload.get("hierarchies", {})
+        if not isinstance(hierarchies, dict):
+            raise ValueError("'hierarchies' must be an object")
         metrics = [
             MetricDefinition(
                 name=item.get("name", item.get("column", "")),
@@ -173,9 +187,9 @@ class SemanticCatalog:
         ]
         return cls(
             metrics=metrics,
-            dimensions=payload.get("dimensions", []),
-            time_column=payload.get("time_column"),
-            hierarchies=payload.get("hierarchies", {})
+            dimensions=dimensions,
+            time_column=time_column,
+            hierarchies=hierarchies
         )
 
     def to_dict(self) -> Dict[str, Any]:

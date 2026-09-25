@@ -17,9 +17,12 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from prophet import Prophet
 from datetime import datetime, timedelta
+import html
 import json
 import re
 import hashlib
+import os
+from io import BytesIO
 from typing import Optional, Tuple, List, Dict, Any
 from scipy import stats
 import warnings
@@ -651,6 +654,22 @@ def _parse_datetime(series: pd.Series) -> pd.Series:
         return pd.to_datetime(series, errors="coerce", format="mixed")
 
 
+# The only markup the app itself puts in narratives; restored after escaping
+_ALLOWED_NARRATIVE_TAGS = {
+    html.escape("<span class='narrative-highlight'>"): "<span class='narrative-highlight'>",
+    html.escape("</span>"): "</span>",
+}
+
+
+def safe_html(value: Any) -> str:
+    """Escape text for raw-HTML blocks so column names, category values and
+    queries from uploaded data can't inject markup or scripts."""
+    text = html.escape(str(value))
+    for escaped, raw in _ALLOWED_NARRATIVE_TAGS.items():
+        text = text.replace(escaped, raw)
+    return text
+
+
 # Share of non-empty values that must convert for a text column to be retyped
 TYPE_CONVERSION_THRESHOLD = 0.9
 
@@ -899,6 +918,79 @@ def generate_sample_data(rows: int = 2000) -> pd.DataFrame:
     data['date'] = pd.to_datetime(data['date'])
     
     return data.sort_values('date').reset_index(drop=True)
+
+
+# Largest number of rows read from an uploaded file (override with MAX_UPLOAD_ROWS)
+MAX_UPLOAD_ROWS = int(os.environ.get("MAX_UPLOAD_ROWS", 200_000))
+
+
+@st.cache_data(show_spinner=False, max_entries=16)
+def list_excel_sheets(content: bytes) -> List[str]:
+    return pd.ExcelFile(BytesIO(content)).sheet_names
+
+
+@st.cache_data(show_spinner="Loading file...", max_entries=16)
+def load_uploaded_file(content: bytes, file_name: str, sheet: Optional[str] = None) -> Dict[str, Any]:
+    """Read, sanitize and profile an uploaded CSV/Excel file, capped at MAX_UPLOAD_ROWS."""
+    buffer = BytesIO(content)
+    if file_name.lower().endswith(".csv"):
+        raw = pd.read_csv(buffer, nrows=MAX_UPLOAD_ROWS + 1)
+    else:
+        raw = pd.read_excel(buffer, sheet_name=sheet or 0, nrows=MAX_UPLOAD_ROWS + 1)
+
+    df = sanitize_dataframe(raw.head(MAX_UPLOAD_ROWS))
+    profiles = DatasetProfiler(df).profile()
+    semantic = SemanticClassifier(profiles).classify()
+    return {
+        "df": df,
+        "truncated": len(raw) > MAX_UPLOAD_ROWS,
+        "profiles": profiles,
+        "semantic": semantic,
+        "kpis": MetricIntelligenceEngine(df, semantic).discover_kpis(),
+    }
+
+
+# -----------------------------------------------------------------------------
+# Cached analysis. Streamlit reruns the whole script on every click, so the
+# expensive steps are cached per dataset. They take the DataFrame as `_df`
+# (not hashed) plus an exact content fingerprint: Streamlit's own DataFrame
+# hashing only samples rows of large frames and could miss a cleaning step.
+# -----------------------------------------------------------------------------
+ANALYSIS_CACHE = dict(show_spinner=False, max_entries=32, ttl=3600)
+
+
+def data_fingerprint(df: pd.DataFrame) -> str:
+    digest = hashlib.sha256(pd.util.hash_pandas_object(df, index=True).values.tobytes())
+    digest.update(repr((list(df.columns), [str(dtype) for dtype in df.dtypes])).encode())
+    return digest.hexdigest()
+
+
+@st.cache_data(**ANALYSIS_CACHE)
+def compute_quality(_df: pd.DataFrame, fingerprint: str) -> Dict[str, Any]:
+    return calculate_data_quality_score(_df)
+
+
+@st.cache_data(**ANALYSIS_CACHE)
+def compute_insights(_df: pd.DataFrame, fingerprint: str) -> Tuple[List[Dict], List[Dict]]:
+    return EnhancedInsightsEngine(_df).generate_all_insights()
+
+
+@st.cache_data(**ANALYSIS_CACHE)
+def compute_profile(_df: pd.DataFrame, fingerprint: str) -> Dict[str, Any]:
+    return DataPreprocessor(_df).profile_data()
+
+
+@st.cache_data(**ANALYSIS_CACHE)
+def dataframe_to_csv(_df: pd.DataFrame, fingerprint: str) -> str:
+    return _df.to_csv(index=False)
+
+
+@st.cache_data(**ANALYSIS_CACHE)
+def run_query(_df: pd.DataFrame, fingerprint: str, query: str, numeric_cols: List[str],
+              categorical_cols: List[str], date_col: Optional[str]) -> Dict[str, Any]:
+    engine = SmartQueryEngine(_df, numeric_cols=numeric_cols,
+                              categorical_cols=categorical_cols, date_col=date_col)
+    return engine.process_query(query)
 
 
 # =============================================================================
@@ -2417,6 +2509,11 @@ class VisualizationBuilder:
 # REPORT GENERATOR - Export to PDF/PowerPoint
 # =============================================================================
 
+def _markdown_bold_to_html(text: str) -> str:
+    """Render **bold** markdown in already-escaped report text."""
+    return re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", text)
+
+
 class ReportGenerator:
     """Generate exportable reports in multiple formats."""
     
@@ -2559,11 +2656,11 @@ class ReportGenerator:
 """
         
         for insight in self.insights[:10]:
-            priority_class = f"insight-{insight.get('priority', 'medium')}"
+            priority_class = f"insight-{safe_html(insight.get('priority', 'medium'))}"
             html += f"""
         <div class="insight {priority_class}">
-            <h3>{insight['icon']} {insight['title']}</h3>
-            <p>{insight.get('narrative', insight['description'])}</p>
+            <h3>{safe_html(insight['icon'])} {safe_html(insight['title'])}</h3>
+            <p>{_markdown_bold_to_html(safe_html(insight.get('narrative', insight['description'])))}</p>
         </div>
 """
         
@@ -2572,9 +2669,9 @@ class ReportGenerator:
         for rec in self.recommendations[:5]:
             html += f"""
         <div class="recommendation">
-            <h3>{rec['icon']} {rec['title']}</h3>
-            <p>{rec['description']}</p>
-            <div class="action">→ {rec['action']}</div>
+            <h3>{safe_html(rec['icon'])} {safe_html(rec['title'])}</h3>
+            <p>{safe_html(rec['description'])}</p>
+            <div class="action">→ {safe_html(rec['action'])}</div>
         </div>
 """
         
@@ -2662,7 +2759,7 @@ def render_suggested_queries(df: pd.DataFrame):
     cols = st.columns(4)
     for i, suggestion in enumerate(suggestions):
         with cols[i % 4]:
-            st.markdown(f"<span class='suggested-query'>{suggestion}</span>", unsafe_allow_html=True)
+            st.markdown(f"<span class='suggested-query'>{safe_html(suggestion)}</span>", unsafe_allow_html=True)
 
 
 # =============================================================================
@@ -2710,36 +2807,29 @@ def main():
                         # ==============================
                         # LOAD FILE
                         # ==============================
-                        if file.name.lower().endswith(".csv"):
-                            temp_df = pd.read_csv(file)
-
-                        else:
-                            excel_file = pd.ExcelFile(file)
-
-                            if len(excel_file.sheet_names) > 1:
+                        content = file.getvalue()
+                        sheet = None
+                        if not file.name.lower().endswith(".csv"):
+                            sheet_names = list_excel_sheets(content)
+                            if len(sheet_names) > 1:
                                 sheet = st.selectbox(
                                     f"Select sheet from {file.name}",
-                                    excel_file.sheet_names,
+                                    sheet_names,
                                     key=f"sheet_{file.name}"
                                 )
-                                temp_df = pd.read_excel(file, sheet_name=sheet)
-                            else:
-                                temp_df = pd.read_excel(file)
 
-                        # ==============================
-                        # SANITIZE DATAFRAME
-                        # ==============================
-                        temp_df = sanitize_dataframe(temp_df)
+                        # Read, sanitize and profile once per file (cached across reruns)
+                        loaded = load_uploaded_file(content, file.name, sheet)
+                        temp_df = loaded["df"]
+                        profiles = loaded["profiles"]
+                        semantic = loaded["semantic"]
+                        kpis = loaded["kpis"]
 
-                        # ==============================
-                        # SEMANTIC ENGINE (CORE BI)
-                        # ==============================
-                        profiler = DatasetProfiler(temp_df)
-                        profiles = profiler.profile()
-
-                        semantic = SemanticClassifier(profiles).classify()
-
-                        kpis = MetricIntelligenceEngine(temp_df, semantic).discover_kpis()
+                        if loaded["truncated"]:
+                            st.warning(
+                                f"⚠️ {file.name} has more than {MAX_UPLOAD_ROWS:,} rows; "
+                                f"only the first {MAX_UPLOAD_ROWS:,} were loaded."
+                            )
 
                         # ==============================
                         # STORE DATASET
@@ -2849,13 +2939,23 @@ def main():
                             st.write(f"• {issue}")
                     else:
                         st.success("✅ Semantic catalog applied successfully.")
-                except json.JSONDecodeError:
+                except (json.JSONDecodeError, UnicodeDecodeError):
                     st.error("❌ Invalid JSON. Please check the catalog format.")
+                except ValueError as e:
+                    st.error(f"❌ Invalid semantic catalog: {e}")
 
         st.markdown("---")
         
+        # Resolve the schema first: it may convert the date column, after
+        # which the data is final for this run and can be fingerprinted
+        semantic_schema = resolve_semantic_schema(df)
+        date_col = semantic_schema["date_col"]
+        if date_col and not pd.api.types.is_datetime64_any_dtype(df[date_col]):
+            df[date_col] = _parse_datetime(df[date_col])
+        fingerprint = data_fingerprint(df)
+
         # Data Quality Score
-        quality = calculate_data_quality_score(df)
+        quality = compute_quality(df, fingerprint)
         quality_class = 'excellent' if quality['overall'] >= 90 else 'good' if quality['overall'] >= 70 else 'poor'
         
         st.markdown(f"""
@@ -2874,10 +2974,6 @@ def main():
         st.markdown("---")
         
         # Quick Stats
-        semantic_schema = resolve_semantic_schema(df)
-        date_col = semantic_schema["date_col"]
-        if date_col and not pd.api.types.is_datetime64_any_dtype(df[date_col]):
-            df[date_col] = _parse_datetime(df[date_col])
         numeric_cols = semantic_schema["numeric_cols"]
         categorical_cols = semantic_schema["categorical_cols"]
         metric_definitions = semantic_schema["metric_definitions"]
@@ -2961,7 +3057,7 @@ def main():
                     st.markdown(f"""
                     <div class="metric-card">
                         <div class="metric-value">{metric['value']:,.0f}</div>
-                        <div class="metric-label">{metric['label']}</div>
+                        <div class="metric-label">{safe_html(metric['label'])}</div>
                         <div class="{delta_class}">{delta_symbol} {abs(metric['delta']):.1f}%</div>
                     </div>
                     """, unsafe_allow_html=True)
@@ -3044,8 +3140,7 @@ def main():
         st.markdown("### 🔍 AI-Powered Insights with Business Narratives")
         
         with st.spinner("🤖 Analyzing your data..."):
-            insights_engine = EnhancedInsightsEngine(df)
-            insights, recommendations = insights_engine.generate_all_insights()
+            insights, recommendations = compute_insights(df, fingerprint)
         
         # Executive Summary
         st.markdown(f"""
@@ -3067,10 +3162,10 @@ def main():
                 for insight in high_priority:
                     st.markdown(f"""
                     <div class="insight-card high-priority animate-slide-in">
-                        <span class="insight-icon">{insight['icon']}</span>
-                        <span class="insight-title">{insight['title']}</span>
-                        <div class="insight-description">{insight['description']}</div>
-                        <div class="insight-narrative">{insight.get('narrative', '')}</div>
+                        <span class="insight-icon">{safe_html(insight['icon'])}</span>
+                        <span class="insight-title">{safe_html(insight['title'])}</span>
+                        <div class="insight-description">{safe_html(insight['description'])}</div>
+                        <div class="insight-narrative">{safe_html(insight.get('narrative', ''))}</div>
                     </div>
                     """, unsafe_allow_html=True)
             
@@ -3079,9 +3174,9 @@ def main():
                     for insight in medium_priority:
                         st.markdown(f"""
                         <div class="insight-card medium-priority">
-                            <span class="insight-icon">{insight['icon']}</span>
-                            <span class="insight-title">{insight['title']}</span>
-                            <div class="insight-description">{insight['description']}</div>
+                            <span class="insight-icon">{safe_html(insight['icon'])}</span>
+                            <span class="insight-title">{safe_html(insight['title'])}</span>
+                            <div class="insight-description">{safe_html(insight['description'])}</div>
                         </div>
                         """, unsafe_allow_html=True)
         
@@ -3090,9 +3185,9 @@ def main():
             for rec in recommendations[:5]:
                 st.markdown(f"""
                 <div class="recommendation-card animate-fade-in">
-                    <div class="recommendation-title">{rec['icon']} {rec['title']}</div>
-                    <div class="recommendation-description">{rec['description']}</div>
-                    <div class="recommendation-action">→ {rec['action']}</div>
+                    <div class="recommendation-title">{safe_html(rec['icon'])} {safe_html(rec['title'])}</div>
+                    <div class="recommendation-description">{safe_html(rec['description'])}</div>
+                    <div class="recommendation-action">→ {safe_html(rec['action'])}</div>
                 </div>
                 """, unsafe_allow_html=True)
     
@@ -3177,13 +3272,7 @@ def main():
         
         if query:
             with st.spinner("🔍 Processing..."):
-                query_engine = SmartQueryEngine(
-                    df,
-                    numeric_cols=numeric_cols,
-                    categorical_cols=categorical_cols,
-                    date_col=date_col
-                )
-                result = query_engine.process_query(query)
+                result = run_query(df, fingerprint, query, numeric_cols, categorical_cols, date_col)
                 
                 st.markdown(result['text'])
                 
@@ -3191,7 +3280,7 @@ def main():
                     st.markdown(f"""
                     <div class="narrative-card">
                         <h4>💡 Analysis</h4>
-                        <p>{result['narrative']}</p>
+                        <p>{safe_html(result['narrative'])}</p>
                     </div>
                     """, unsafe_allow_html=True)
                 
@@ -3234,7 +3323,7 @@ def main():
         st.markdown("### 🔧 Data Preprocessing & Cleaning")
         
         preprocessor = DataPreprocessor(df)
-        profile = preprocessor.profile_data()
+        profile = compute_profile(df, fingerprint)
 
         def apply_preprocessing(message: str) -> None:
             """Keep the cleaned data for this dataset so every tab uses it."""
@@ -3333,10 +3422,7 @@ def main():
     with tab6:
         st.markdown("### 📄 Export Reports")
         
-        # Generate insights if not already done
-        if 'insights' not in dir() or not insights:
-            insights_engine = EnhancedInsightsEngine(df)
-            insights, recommendations = insights_engine.generate_all_insights()
+        insights, recommendations = compute_insights(df, fingerprint)
         
         report_gen = ReportGenerator(df, insights, recommendations)
         
@@ -3384,7 +3470,7 @@ def main():
         with col1:
             st.download_button(
                 "📥 Download Full Dataset (CSV)",
-                df.to_csv(index=False),
+                dataframe_to_csv(df, fingerprint),
                 "data_export.csv",
                 "text/csv",
                 use_container_width=True
@@ -3427,7 +3513,7 @@ def main():
                         st.markdown(f"""
                         <div class="narrative-card">
                             <h4>💡 Business Insight</h4>
-                            <p>{card['summary']}</p>
+                            <p>{safe_html(card['summary'])}</p>
                         </div>
                         """, unsafe_allow_html=True)
                     if card.get("figure") is not None:

@@ -153,3 +153,84 @@ def test_missing_value_handling_fills_nulls(strategy):
     # mean/median only apply to numeric columns; text columns are left as-is
     expected_text_nulls = 1 if strategy in ("mean", "median") else 0
     assert out["y"].isna().sum() == expected_text_nulls
+
+
+# -----------------------------------------------------------------------------
+# Security, upload limits and caching
+# -----------------------------------------------------------------------------
+
+XSS = "<img src=x onerror=alert(1)>"
+
+
+def dataset_with_malicious_category() -> pd.DataFrame:
+    # A large gap between the two groups produces a "performance gap" insight
+    # whose title, description and narrative all include the category value
+    return pd.DataFrame({
+        "region": [XSS] * 60 + ["North"] * 60,
+        "sales": [1000.0 + i for i in range(60)] + [10.0 + i for i in range(60)],
+    })
+
+
+def test_safe_html_escapes_markup_but_keeps_highlight_spans():
+    narrative = f"<span class='narrative-highlight'>{XSS}</span> & more"
+    assert dashboard.safe_html(narrative) == (
+        "<span class='narrative-highlight'>&lt;img src=x onerror=alert(1)&gt;</span> &amp; more"
+    )
+
+
+def test_uploaded_values_are_escaped_in_the_app():
+    at = run_app(datasets={"evil.csv": dataset_with_malicious_category()}, active_dataset="evil.csv")
+    at.radio[0].set_value("Upload File").run()
+    assert_no_errors(at)
+    raw_html = [m.value for m in at.markdown if m.allow_html]
+    assert not any("<img" in block for block in raw_html)
+    assert any("&lt;img src=x onerror=alert(1)&gt;" in block for block in raw_html)
+
+
+def test_html_report_escapes_uploaded_values():
+    df = dataset_with_malicious_category()
+    insights, recommendations = dashboard.EnhancedInsightsEngine(df).generate_all_insights()
+    assert any(XSS in i["description"] for i in insights)
+    report = dashboard.ReportGenerator(df, insights, recommendations).generate_html_report()
+    assert "<img" not in report
+    assert "&lt;img src=x onerror=alert(1)&gt;" in report
+
+
+@pytest.mark.parametrize("payload, message", [
+    ([1, 2], "must be a JSON object"),
+    ({"metrics": "revenue"}, "'metrics' must be a list"),
+    ({"metrics": ["revenue"]}, "'metrics' must be a list"),
+    ({"dimensions": "region"}, "'dimensions' must be a list"),
+    ({"time_column": ["date"]}, "'time_column' must be a column name"),
+    ({"hierarchies": []}, "'hierarchies' must be an object"),
+])
+def test_semantic_catalog_rejects_malformed_payloads(payload, message):
+    with pytest.raises(ValueError, match=message):
+        dashboard.SemanticCatalog.from_dict(payload)
+
+
+def test_upload_is_capped_at_max_rows(monkeypatch):
+    monkeypatch.setattr(dashboard, "MAX_UPLOAD_ROWS", 10)
+    dashboard.load_uploaded_file.clear()
+    csv = "date,amount\n" + "\n".join(f"2024-01-{d:02d},\"1,{d:03d}\"" for d in range(1, 26))
+    loaded = dashboard.load_uploaded_file(csv.encode(), "orders.csv")
+    assert loaded["truncated"]
+    assert len(loaded["df"]) == 10
+    assert pd.api.types.is_float_dtype(loaded["df"]["amount"])
+
+
+def test_excel_upload_loads():
+    buffer = pd.io.common.BytesIO()
+    pd.DataFrame({"city": ["Delhi", "Pune"], "sales": [1.0, 2.0]}).to_excel(buffer, index=False)
+    loaded = dashboard.load_uploaded_file(buffer.getvalue(), "sales.xlsx")
+    assert not loaded["truncated"]
+    assert loaded["df"]["sales"].tolist() == [1.0, 2.0]
+
+
+def test_fingerprint_detects_a_single_changed_value_in_a_large_frame():
+    # Streamlit's own hashing samples rows of frames this size
+    df = pd.DataFrame({"x": np.arange(150_000, dtype="float64")})
+    changed = df.copy()
+    changed.loc[123_456, "x"] = -1.0
+    assert dashboard.data_fingerprint(df) != dashboard.data_fingerprint(changed)
+    assert dashboard.data_fingerprint(df) == dashboard.data_fingerprint(df.copy())
