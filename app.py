@@ -20,9 +20,7 @@ from datetime import datetime, timedelta
 import json
 import re
 import hashlib
-import base64
-from io import BytesIO
-from typing import Optional, Tuple, List, Dict, Any, Union
+from typing import Optional, Tuple, List, Dict, Any
 from scipy import stats
 import warnings
 warnings.filterwarnings('ignore')
@@ -751,7 +749,7 @@ def calculate_data_quality_score(df: pd.DataFrame) -> Dict[str, Any]:
             try:
                 pd.to_numeric(df[col], errors='raise')
                 consistency -= 5  # Penalty for numeric stored as string
-            except:
+            except Exception:
                 pass
     
     overall_score = (completeness * 0.4 + uniqueness * 0.3 + consistency * 0.3)
@@ -1133,7 +1131,7 @@ class NarrativeEngine:
                     
                     if abs(top_change_val) > 15:
                         causes.append(f"{'strong performance' if top_change_val > 0 else 'underperformance'} in {cat_col} '{top_change}'")
-            except:
+            except Exception:
                 continue
         
         return ", ".join(causes[:2]) if causes else ""
@@ -1265,7 +1263,7 @@ class EnhancedInsightsEngine:
                             'type': 'trend',
                             'icon': '📈' if change_pct > 0 else '📉',
                             'title': f'{col.replace("_", " ").title()} {"Increased" if change_pct > 0 else "Decreased"} by {abs(change_pct):.1f}%',
-                            'description': f'Comparing recent 20% of data vs earliest 20%',
+                            'description': 'Comparing recent 20% of data vs earliest 20%',
                             'narrative': narrative,
                             'priority': 'high' if abs(change_pct) > 20 else 'medium',
                             'metric': col,
@@ -1285,13 +1283,13 @@ class EnhancedInsightsEngine:
                                 'type': 'trend_weekly',
                                 'icon': '📅',
                                 'title': f'Week-over-Week: {col.replace("_", " ").title()} {"Up" if wow_change > 0 else "Down"} {abs(wow_change):.1f}%',
-                                'description': f'Comparing last 7 days vs previous 7 days',
+                                'description': 'Comparing last 7 days vs previous 7 days',
                                 'narrative': f'Short-term momentum shows {col.replace("_", " ")} {"accelerating" if wow_change > 0 else "decelerating"} with a {abs(wow_change):.1f}% {"gain" if wow_change > 0 else "decline"} week-over-week.',
                                 'priority': 'medium',
                                 'metric': col,
                                 'value': wow_change
                             })
-            except Exception as e:
+            except Exception:
                 continue
     
     def _analyze_correlations(self):
@@ -1319,7 +1317,7 @@ class EnhancedInsightsEngine:
                             'metric': f'{col1}_vs_{col2}',
                             'value': corr_val
                         })
-        except:
+        except Exception:
             pass
     
     def _detect_anomalies(self):
@@ -1349,7 +1347,7 @@ class EnhancedInsightsEngine:
                         'metric': col,
                         'value': anomaly_pct
                     })
-            except:
+            except Exception:
                 continue
     
     def _analyze_categorical_performance(self):
@@ -1387,7 +1385,7 @@ class EnhancedInsightsEngine:
                                     'metric': f'{cat_col}_{num_col}',
                                     'value': gap_pct
                                 })
-                except:
+                except Exception:
                     continue
     
     def _analyze_distributions(self):
@@ -1395,7 +1393,6 @@ class EnhancedInsightsEngine:
         for col in self.numeric_cols[:3]:
             try:
                 skewness = self.df[col].skew()
-                kurtosis = self.df[col].kurtosis()
                 
                 if abs(skewness) > 1.5:
                     direction = "right (positive)" if skewness > 0 else "left (negative)"
@@ -1410,7 +1407,7 @@ class EnhancedInsightsEngine:
                         'metric': col,
                         'value': skewness
                     })
-            except:
+            except Exception:
                 continue
     
     def _perform_statistical_tests(self):
@@ -1446,7 +1443,7 @@ class EnhancedInsightsEngine:
                                     'metric': f'{cat_col}_{num_col}_ttest',
                                     'value': p_value
                                 })
-                except:
+                except Exception:
                     continue
     
     def _detect_seasonality(self):
@@ -1477,7 +1474,7 @@ class EnhancedInsightsEngine:
                                 'metric': col,
                                 'value': autocorr_7
                             })
-            except:
+            except Exception:
                 continue
     
     def _generate_recommendations(self):
@@ -1499,7 +1496,7 @@ class EnhancedInsightsEngine:
                 self.recommendations.append({
                     'icon': '📊',
                     'title': 'Leverage Correlation for Prediction',
-                    'description': f"The strong correlation identified can be used to build predictive models. When one variable changes, you can anticipate changes in the correlated variable.",
+                    'description': "The strong correlation identified can be used to build predictive models. When one variable changes, you can anticipate changes in the correlated variable.",
                     'action': 'Develop regression model for forecasting',
                     'priority': 'medium'
                 })
@@ -1890,7 +1887,7 @@ class SmartQueryEngine:
         )
         
         result['figure'] = fig
-        result['text'] = f"## 🔗 Correlation Analysis"
+        result['text'] = "## 🔗 Correlation Analysis"
         
         strength = "very strong" if abs(correlation) > 0.8 else "strong" if abs(correlation) > 0.6 else "moderate" if abs(correlation) > 0.4 else "weak"
         direction = "positive" if correlation > 0 else "negative"
@@ -2083,7 +2080,7 @@ class SmartQueryEngine:
         result['follow_up_suggestions'] = suggestions
         
         # Provide schema context
-        result['narrative'] += f"\n\n**Available columns:**\n"
+        result['narrative'] += "\n\n**Available columns:**\n"
         result['narrative'] += f"- Numeric: {', '.join(self.numeric_cols[:5])}\n"
         result['narrative'] += f"- Categorical: {', '.join(self.categorical_cols[:5])}\n"
         
@@ -3051,9 +3048,6 @@ def main():
             insights, recommendations = insights_engine.generate_all_insights()
         
         # Executive Summary
-        narrative_engine = NarrativeEngine(df)
-        exec_summary = narrative_engine.generate_executive_summary(insights)
-        
         st.markdown(f"""
         <div class="narrative-card">
             <h4>📋 Executive Summary</h4>
