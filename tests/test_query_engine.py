@@ -146,3 +146,15 @@ def test_apply_filters_ignores_case_and_compares_numbers():
     df = pd.DataFrame({"city": ["Delhi", "delhi ", "Pune"], "sales": [1.0, 5.0, 9.0]})
     assert len(apply_filters(df, [{"column": "city", "operator": "==", "value": "DELHI"}])) == 2
     assert len(apply_filters(df, [{"column": "sales", "operator": ">=", "value": 5.0}])) == 2
+
+
+def test_common_words_as_column_names_or_values_do_not_hijack_questions():
+    df = pd.DataFrame({
+        "a": ["x", "y"] * 10, "time": [1.0, 2.0] * 10,
+        "status": ["in", "out"] * 10, "sales": range(20), "region": ["North", "South"] * 10,
+    })
+    engine = SmartQueryEngine(df)
+    intent = engine.process_query("what is the total sales in a region")["intent"]
+    assert intent["groupby"] == "region"
+    assert intent["metric"] == "sales"
+    assert intent["filters"] == []

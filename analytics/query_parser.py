@@ -75,6 +75,14 @@ _SYNONYMS = {
 # Columns that hold rates or scores are averaged rather than summed by default
 _RATE_COLUMN = re.compile(r"margin|rate|ratio|score|percent|pct|%|avg|average")
 
+# Words that are never treated as column names or category values, so a column
+# called "a" or a category "in" can't hijack ordinary questions
+_STOPWORDS = {
+    "a", "an", "the", "by", "in", "of", "is", "to", "for", "and", "or", "per", "on", "at",
+    "top", "all", "each", "show", "what", "which", "how", "many", "much", "me", "with", "where",
+    "vs", "over", "total", "sum", "average", "mean", "count", "trend", "time", "data",
+}
+
 # Categorical columns with more distinct values than this are not scanned for value mentions
 _MAX_VALUES_TO_MATCH = 50
 
@@ -134,7 +142,8 @@ class QueryParser:
             name = str(col).lower().strip()
             spaced = name.replace("_", " ")
             for form in _word_forms(spaced) | _word_forms(name):
-                aliases.setdefault(form, col)
+                if len(form) >= 2 and form not in _STOPWORDS:
+                    aliases.setdefault(form, col)
         for word, fragment in _SYNONYMS.items():
             target = next((c for c in self.df.columns if fragment in str(c).lower()), None)
             if target is not None:
@@ -152,7 +161,7 @@ class QueryParser:
                 continue
             for value in uniques:
                 text = str(value).strip().lower()
-                if len(text) >= 2 and _to_number(text) is None:
+                if len(text) >= 2 and text not in _STOPWORDS and _to_number(text) is None:
                     values.append((text, col, value))
         return sorted(values, key=lambda v: -len(v[0]))
 
