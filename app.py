@@ -28,6 +28,8 @@ from analytics.data_utils import (  # noqa: F401  (re-exported for tests and cal
 from analytics.forecasting import PredictiveEngine
 from analytics.formatting import format_number, safe_html
 from analytics.insights import EnhancedInsightsEngine, NarrativeEngine  # noqa: F401
+from analytics.llm import GLMClient, LLMConfig, LLMError, LLMQueryPlanner, describe_schema
+from analytics.query_parser import normalize_intent
 from analytics.preprocessing import DataPreprocessor
 from analytics.query_engine import SmartQueryEngine
 from analytics.reports import ReportGenerator
@@ -229,10 +231,55 @@ def dataframe_to_csv(_df: pd.DataFrame, fingerprint: str) -> str:
 
 @st.cache_data(**ANALYSIS_CACHE)
 def run_query(_df: pd.DataFrame, fingerprint: str, query: str, numeric_cols: List[str],
-              categorical_cols: List[str], date_col: Optional[str]) -> Dict[str, Any]:
+              categorical_cols: List[str], date_col: Optional[str],
+              plan_json: Optional[str] = None) -> Dict[str, Any]:
+    """Answer a question with the built-in parser, or run a plan from the LLM when given."""
     engine = SmartQueryEngine(_df, numeric_cols=numeric_cols,
                               categorical_cols=categorical_cols, date_col=date_col)
-    return engine.process_query(query)
+    return engine.process_query(query, intent=json.loads(plan_json) if plan_json else None)
+
+
+# -----------------------------------------------------------------------------
+# Optional GLM query planning for Ask Data (see analytics/llm.py)
+# -----------------------------------------------------------------------------
+
+def llm_config() -> Optional[LLMConfig]:
+    """GLM settings from the environment or .streamlit/secrets.toml; None without a key."""
+    return LLMConfig.from_env(secrets=lambda name: st.secrets.get(name))
+
+
+@st.cache_data(show_spinner=False, max_entries=256, ttl=3600)
+def plan_with_llm(_schema: Dict[str, Any], fingerprint: str, query: str, model: str) -> Dict[str, Any]:
+    """Ask the model for a query plan. Errors are raised, so failed calls are not cached."""
+    config = llm_config()
+    if config is None:
+        raise LLMError("no API key configured")
+    return LLMQueryPlanner(GLMClient(config)).plan(query, _schema)
+
+
+def answer_question(df: pd.DataFrame, fingerprint: str, query: str, numeric_cols: List[str],
+                    categorical_cols: List[str], date_col: Optional[str], use_llm: bool) -> Dict[str, Any]:
+    """Answer with a GLM-planned query when enabled, falling back to the built-in parser."""
+    source, note, plan_json = "built-in parser", None, None
+    config = llm_config() if use_llm else None
+    if config is not None:
+        try:
+            schema = describe_schema(df, numeric_cols, categorical_cols, date_col)
+            raw = plan_with_llm(schema, fingerprint, query, config.model)
+            plan = normalize_intent(raw, df, numeric_cols, categorical_cols, date_col)
+            if plan["type"] is None and plan["aggregation"] is None:
+                note = f"{config.model} couldn't map this question to the data; answered with the built-in parser."
+            else:
+                plan_json = json.dumps(raw, sort_keys=True, default=str)
+                source = config.model
+        except LLMError as e:
+            logger.warning("LLM planning failed, using the built-in parser: %s", e)
+            note = f"{config.model} was unavailable ({e}); answered with the built-in parser."
+
+    result = run_query(df, fingerprint, query, numeric_cols, categorical_cols, date_col, plan_json)
+    result['source'] = source
+    result['llm_note'] = note
+    return result
 
 
 # =============================================================================
@@ -778,7 +825,18 @@ def main():
         st.markdown("### 💬 Ask Your Data")
         
         st.markdown('<div class="query-container">', unsafe_allow_html=True)
-        
+
+        glm = llm_config()
+        if glm is not None:
+            use_llm = st.toggle(f"Use {glm.model} to interpret questions", value=True, key="use_llm")
+            st.caption("Sends column names, types, up to 15 category values per column and the date "
+                       "range to Z.ai — never the data rows. The reply is checked against your columns "
+                       "before anything runs.")
+        else:
+            use_llm = False
+            st.caption("Using the built-in question parser. Set `ZAI_API_KEY` to let GLM-4.5-Flash "
+                       "interpret questions (see README).")
+
         query = st.text_input(
             "Enter your question",
             placeholder="e.g., 'Total sales by region' or 'What insights can you find?'",
@@ -799,9 +857,12 @@ def main():
         
         if query:
             with st.spinner("🔍 Processing..."):
-                result = run_query(df, fingerprint, query, numeric_cols, categorical_cols, date_col)
-                
+                result = answer_question(df, fingerprint, query, numeric_cols, categorical_cols,
+                                         date_col, use_llm)
+
                 st.markdown(result['text'])
+                if result.get('llm_note'):
+                    st.info(result['llm_note'])
                 
                 if result.get('narrative'):
                     st.markdown(f"""
@@ -821,6 +882,9 @@ def main():
                     st.markdown("**Follow-up questions:**")
                     for sugg in result['follow_up_suggestions'][:3]:
                         st.markdown(f"• {sugg}")
+
+                with st.expander(f"How this was answered: {result['source']}"):
+                    st.json(result['intent'])
 
                 if result.get('figure') is not None or isinstance(result.get('data'), pd.DataFrame):
                     st.markdown("---")

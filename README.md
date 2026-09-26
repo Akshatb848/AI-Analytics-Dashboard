@@ -27,11 +27,11 @@ A comprehensive analytics platform featuring automated insights, predictive anal
 - Exportable forecast data
 
 ### 💬 **Natural Language Queries**
-- Ask questions in plain English
-- Automatic query interpretation
-- Dynamic visualization generation
-- Support for aggregations, filters, and comparisons
-- Example queries for guidance
+- Ask questions in plain English, answered with a chart, table and short explanation
+- Totals, averages, counts, top/bottom N, one or two groupings ("sales by region and channel")
+- Filters by category value, number or year ("average profit in North where discount >= 0.2 in 2025")
+- Trends by day, week, month, quarter or year, correlations, distributions and outliers
+- Optional **GLM-4.5-Flash** (Z.ai, free tier) to interpret free-form questions — see below
 
 ### 🧠 **Semantic Catalog (Governed Metrics)**
 - Upload a JSON semantic catalog to define metrics, dimensions, and time grains
@@ -286,6 +286,40 @@ ai-analytics-dashboard/
 | `MAX_UPLOAD_ROWS` | Maximum rows read from an uploaded file; larger files are truncated with a warning | 200000 |
 
 Uploads are limited to 50 MB via `server.maxUploadSize` in `.streamlit/config.toml`.
+
+### GLM-4.5-Flash for Ask Data (optional)
+
+Without an API key, Ask Data uses the built-in rule-based parser. With a Z.ai key, questions
+are interpreted by **GLM-4.5-Flash** (free, rate-limited), which handles freer phrasing.
+
+1. Create an API key at [z.ai](https://z.ai) (API keys page of the Z.ai open platform).
+2. Provide it as `ZAI_API_KEY`, either as an environment variable:
+
+   ```bash
+   export ZAI_API_KEY="your-key"
+   streamlit run app.py
+   ```
+
+   or in `.streamlit/secrets.toml` (already in `.gitignore`; on Streamlit Cloud use the app's
+   **Secrets** settings instead):
+
+   ```toml
+   ZAI_API_KEY = "your-key"
+   ```
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `ZAI_API_KEY` | Z.ai API key; enables GLM in Ask Data | not set |
+| `ZAI_MODEL` | Model name | `glm-4.5-flash` |
+| `ZAI_BASE_URL` | API base URL. Keys from the GLM Coding Plan use `https://api.z.ai/api/coding/paas/v4` | `https://api.z.ai/api/paas/v4` |
+
+**How it works and what is sent.** The model only turns the question into a query plan (which
+columns, filters, grouping, aggregation); the app validates that plan against your columns and
+runs it with pandas, so the model never executes code. Z.ai receives the question plus column
+names, column types, up to 15 values per category column and the date range — **never the data
+rows**. If the key is missing, the API is unreachable or rate-limited, or the reply can't be used,
+the built-in parser answers and the app says so. A toggle in the Ask Data tab turns GLM off, and
+"How this was answered" shows the plan that ran.
 
 ### Custom Theming
 
