@@ -1,7 +1,6 @@
 """Natural-language questions answered with charts and tables."""
 import logging
-import re
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 import plotly.express as px
@@ -15,6 +14,7 @@ from analytics.data_utils import (
 )
 from analytics.formatting import format_number
 from analytics.insights import EnhancedInsightsEngine
+from analytics.query_parser import QueryParser, apply_filters, describe_filters, normalize_intent
 
 
 logger = logging.getLogger(__name__)
@@ -22,9 +22,11 @@ logger = logging.getLogger(__name__)
 
 class SmartQueryEngine:
     """
-    Intelligent query processing with semantic understanding.
-    Architecture ready for LLM integration (OpenAI/Anthropic API).
-    Currently uses advanced pattern matching with fallback to smart defaults.
+    Answers plain-English questions about a DataFrame.
+
+    Questions are turned into a validated query plan, either by the built-in
+    rule-based parser or by a plan supplied to `process_query` (for example
+    from an LLM), and the plan is then run with pandas.
     """
     
     def __init__(
@@ -39,41 +41,9 @@ class SmartQueryEngine:
         self.categorical_cols = categorical_cols or detect_categorical_columns(df)
         self.date_col = date_col or detect_date_column(df)
         self.schema = self._build_schema()
-        
-        # Enhanced patterns for better query understanding
-        self.intent_patterns = {
-            'aggregate': {
-                'sum': r'(?:total|sum|aggregate|combined|overall)\s+(?:of\s+)?(\w+)',
-                'average': r'(?:average|mean|avg|typical)\s+(?:of\s+)?(\w+)',
-                'max': r'(?:max(?:imum)?|highest|largest|best|top|peak)\s+(\w+)',
-                'min': r'(?:min(?:imum)?|lowest|smallest|worst|bottom)\s+(\w+)',
-                'count': r'(?:count|number|how many|quantity)\s+(?:of\s+)?(\w+)?',
-                'median': r'(?:median|middle)\s+(?:of\s+)?(\w+)',
-            },
-            'grouping': {
-                'by': r'(?:by|per|for each|grouped by|across|segmented by)\s+(\w+)',
-                'compare': r'compare\s+(\w+)\s+(?:and|vs|versus|with|to)\s+(\w+)',
-            },
-            'filtering': {
-                'where': r'(?:where|when|if|for|in|with)\s+(\w+)\s*(?:is|=|equals?|==)\s*["\']?([^"\']+)["\']?',
-                'top_n': r'(?:top|first|best)\s+(\d+)',
-                'bottom_n': r'(?:bottom|last|worst)\s+(\d+)',
-                'greater': r'(\w+)\s*(?:>|greater than|more than|above|over)\s*(\d+(?:\.\d+)?)',
-                'less': r'(\w+)\s*(?:<|less than|under|below)\s*(\d+(?:\.\d+)?)',
-            },
-            'analysis': {
-                'trend': r'(?:trend|over time|time series|growth|change|evolution)\s+(?:of\s+)?(\w+)?',
-                'correlation': r'(?:correlation|relationship|connection|link)\s+(?:between\s+)?(\w+)\s+(?:and|with)\s+(\w+)',
-                'distribution': r'(?:distribution|spread|histogram|breakdown)\s+(?:of\s+)?(\w+)',
-                'forecast': r'(?:forecast|predict|projection|future)\s+(?:of\s+)?(\w+)',
-                'anomaly': r'(?:anomal(?:y|ies)|outlier|unusual|abnormal)\s+(?:in\s+)?(\w+)?',
-            },
-            'insights': {
-                'insight': r'(?:insight|finding|discover|analyze|tell me about|explain|why)',
-                'summary': r'(?:summary|overview|describe|summarize|recap)',
-                'key': r'(?:key|important|significant|main|critical)',
-            }
-        }
+        self.parser = QueryParser(df, self.numeric_cols, self.categorical_cols, self.date_col)
+        # Rows the current question applies to (after its filters)
+        self.data = df
     
     def _build_schema(self) -> Dict:
         """Build data schema for context."""
@@ -108,122 +78,19 @@ class SmartQueryEngine:
         
         return schema
     
-    def _find_column(self, term: str) -> Optional[str]:
-        """Smart column matching with fuzzy logic."""
-        if not term:
-            return None
-        
-        term_lower = term.lower().strip()
-        
-        # Exact match
-        for col in self.df.columns:
-            if col.lower() == term_lower:
-                return col
-        
-        # Partial match
-        for col in self.df.columns:
-            if term_lower in col.lower() or col.lower() in term_lower:
-                return col
-        
-        # Word-level match
-        for col in self.df.columns:
-            col_words = set(col.lower().replace('_', ' ').split())
-            if term_lower in col_words:
-                return col
-        
-        # Synonym matching
-        synonyms = {
-            'revenue': ['sales', 'income', 'amount'],
-            'profit': ['margin', 'earnings', 'gain'],
-            'cost': ['expense', 'spending', 'price'],
-            'quantity': ['count', 'number', 'volume', 'qty'],
-            'date': ['time', 'day', 'period', 'when'],
-            'category': ['type', 'group', 'segment', 'class'],
-            'region': ['area', 'location', 'territory', 'zone']
-        }
-        
-        for col, syns in synonyms.items():
-            if term_lower in syns:
-                for df_col in self.df.columns:
-                    if col in df_col.lower():
-                        return df_col
-        
-        return None
     
     def _detect_intent(self, query: str) -> Dict:
-        """Detect query intent and extract parameters."""
-        query_lower = query.lower()
-        intent = {
-            'type': None,
-            'aggregation': None,
-            'metric': None,
-            'groupby': None,
-            'filters': [],
-            'limit': None,
-            'sort_order': 'desc'
-        }
-        
-        # Check for insight/summary requests
-        for pattern in self.intent_patterns['insights'].values():
-            if re.search(pattern, query_lower):
-                intent['type'] = 'insight'
-                break
-        
-        # Check for analysis types
-        for analysis_type, pattern in self.intent_patterns['analysis'].items():
-            match = re.search(pattern, query_lower)
-            if match:
-                intent['type'] = analysis_type
-                if match.groups():
-                    intent['metric'] = self._find_column(match.group(1))
-                break
-        
-        # Check for aggregations
-        for agg_type, pattern in self.intent_patterns['aggregate'].items():
-            match = re.search(pattern, query_lower)
-            if match:
-                intent['aggregation'] = agg_type
-                if match.group(1):
-                    intent['metric'] = self._find_column(match.group(1))
-                if not intent['type']:
-                    intent['type'] = 'aggregate'
-                break
-        
-        # Check for grouping
-        for group_type, pattern in self.intent_patterns['grouping'].items():
-            match = re.search(pattern, query_lower)
-            if match:
-                intent['groupby'] = self._find_column(match.group(1))
-                break
-        
-        # Check for filters
-        where_match = re.search(self.intent_patterns['filtering']['where'], query_lower)
-        if where_match:
-            filter_col = self._find_column(where_match.group(1))
-            if filter_col:
-                intent['filters'].append({
-                    'column': filter_col,
-                    'operator': '==',
-                    'value': where_match.group(2).strip()
-                })
-        
-        # Check for top/bottom N
-        top_match = re.search(self.intent_patterns['filtering']['top_n'], query_lower)
-        if top_match:
-            intent['limit'] = int(top_match.group(1))
-            intent['sort_order'] = 'desc'
-        
-        bottom_match = re.search(self.intent_patterns['filtering']['bottom_n'], query_lower)
-        if bottom_match:
-            intent['limit'] = int(bottom_match.group(1))
-            intent['sort_order'] = 'asc'
-        
-        return intent
+        """Parse a question into a validated query plan (see analytics.query_parser)."""
+        return self.normalize(self.parser.parse(query))
+
+    def normalize(self, raw_intent: Any) -> Dict:
+        """Validate a plan from any source against this dataset."""
+        return normalize_intent(raw_intent, self.df, self.numeric_cols, self.categorical_cols, self.date_col)
     
-    def process_query(self, query: str) -> Dict:
-        """Process query and return comprehensive results."""
-        intent = self._detect_intent(query)
-        
+    def process_query(self, query: str, intent: Optional[Dict] = None) -> Dict:
+        """Answer a question, using a plan supplied by the caller (e.g. an LLM) when given."""
+        intent = self.normalize(intent) if intent is not None else self._detect_intent(query)
+
         result = {
             'success': True,
             'query': query,
@@ -234,41 +101,59 @@ class SmartQueryEngine:
             'narrative': '',
             'follow_up_suggestions': []
         }
-        
+
         try:
-            # Route to appropriate handler
-            if intent['type'] == 'insight':
-                return self._handle_insight_query(query, result)
-            elif intent['type'] == 'trend':
-                return self._handle_trend_query(intent, result)
-            elif intent['type'] == 'correlation':
-                return self._handle_correlation_query(intent, result)
-            elif intent['type'] == 'distribution':
-                return self._handle_distribution_query(intent, result)
-            elif intent['type'] == 'anomaly':
-                return self._handle_anomaly_query(intent, result)
-            elif intent['type'] == 'forecast':
-                return self._handle_forecast_query(intent, result)
-            elif intent['aggregation']:
-                return self._handle_aggregation_query(intent, result)
-            else:
-                return self._handle_default_query(query, result)
-                
+            self.data = apply_filters(self.df, intent['filters'])
+            if intent['filters'] and self.data.empty:
+                result['text'] = f"No rows match {describe_filters(intent['filters'])}."
+                return result
+
+            result = self._route(query, intent, result)
+            if intent['unmatched'] and result['text']:
+                terms = ", ".join(f"'{t}'" for t in intent['unmatched'])
+                note = (f"⚠️ I couldn't match {terms} to a column, so that condition was ignored. "
+                        f"Available columns: {', '.join(map(str, self.df.columns[:12]))}.")
+                result['narrative'] = f"{note}\n\n{result['narrative']}".strip()
+            return result
+
         except Exception as e:
             logger.exception("Query failed: %r", query)
             result['success'] = False
             result['text'] = f"Error processing query: {str(e)}"
             result['follow_up_suggestions'] = get_suggested_queries(self.df)
             return result
+
+    def _route(self, query: str, intent: Dict, result: Dict) -> Dict:
+        """Send a validated plan to the handler for its type."""
+        # Route to appropriate handler
+        if intent['type'] == 'insight':
+            return self._handle_insight_query(query, result)
+        elif intent['type'] == 'trend':
+            return self._handle_trend_query(intent, result)
+        elif intent['type'] == 'correlation':
+            return self._handle_correlation_query(intent, result)
+        elif intent['type'] == 'distribution':
+            return self._handle_distribution_query(intent, result)
+        elif intent['type'] == 'anomaly':
+            return self._handle_anomaly_query(intent, result)
+        elif intent['type'] == 'forecast':
+            return self._handle_forecast_query(intent, result)
+        elif intent['type'] == 'aggregate' or intent['aggregation']:
+            return self._handle_aggregation_query(intent, result)
+        else:
+            return self._handle_default_query(query, result)
+
+    def _filter_suffix(self, intent: Dict) -> str:
+        return f" ({describe_filters(intent['filters'])})" if intent['filters'] else ""
     
     def _handle_insight_query(self, query: str, result: Dict) -> Dict:
         """Handle requests for insights."""
-        engine = EnhancedInsightsEngine(self.df)
+        engine = EnhancedInsightsEngine(self.data)
         insights, recommendations = engine.generate_all_insights()
         
         high_priority = [i for i in insights if i['priority'] == 'high'][:3]
         
-        result['text'] = f"## 🔍 Key Insights from Your Data\n\nAnalyzed **{len(self.df):,}** records and found **{len(insights)}** insights."
+        result['text'] = f"## 🔍 Key Insights from Your Data\n\nAnalyzed **{len(self.data):,}** records and found **{len(insights)}** insights."
         
         narrative_parts = []
         for insight in high_priority:
@@ -290,70 +175,102 @@ class SmartQueryEngine:
         return result
     
     def _handle_trend_query(self, intent: Dict, result: Dict) -> Dict:
-        """Handle trend analysis queries."""
+        """Handle trend analysis queries, optionally per time grain and per group."""
         metric = intent['metric'] or (self.numeric_cols[0] if self.numeric_cols else None)
-        
+
         if not metric or not self.date_col:
             result['text'] = "Cannot perform trend analysis. Need a date column and numeric metric."
             return result
-        
-        # Calculate trend data
-        trend_data = self.df.groupby(self.date_col)[metric].sum().reset_index()
-        trend_data = trend_data.sort_values(self.date_col)
-        trend_data['ma_7'] = trend_data[metric].rolling(window=7, min_periods=1).mean()
-        
-        # Calculate growth
-        first_val = trend_data[metric].iloc[:7].mean()
-        last_val = trend_data[metric].iloc[-7:].mean()
-        growth = ((last_val - first_val) / first_val * 100) if first_val != 0 else 0
-        
-        # Create figure
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(
-            x=trend_data[self.date_col], y=trend_data[metric],
-            mode='lines', name='Daily', line=dict(color='#6366f1', width=1), opacity=0.6
-        ))
-        fig.add_trace(go.Scatter(
-            x=trend_data[self.date_col], y=trend_data['ma_7'],
-            mode='lines', name='7-Day MA', line=dict(color='#10b981', width=2)
-        ))
-        fig.update_layout(
-            template='plotly_dark',
-            paper_bgcolor='rgba(0,0,0,0)',
-            plot_bgcolor='rgba(0,0,0,0)',
-            title=f'{metric.replace("_", " ").title()} Trend Over Time',
-            hovermode='x unified'
-        )
-        
+
+        grain = intent['time_grain'] or 'D'
+        grain_name = {'D': 'Daily', 'W': 'Weekly', 'MS': 'Monthly', 'QS': 'Quarterly', 'YS': 'Yearly'}[grain]
+        how = 'mean' if intent['aggregation'] in ('average', 'median') else 'sum'
+        group = intent['groupby']
+        keys = [pd.Grouper(key=self.date_col, freq=grain)] + ([group] if group else [])
+        trend_data = self.data.groupby(keys)[metric].agg(how).reset_index().sort_values(self.date_col)
+        label = metric.replace("_", " ").title()
+
+        if group:
+            fig = px.line(trend_data, x=self.date_col, y=metric, color=group,
+                          title=f'{grain_name} {label} by {group.replace("_", " ").title()}')
+        else:
+            trend_data['change_pct'] = trend_data[metric].pct_change() * 100
+            window = 7 if grain == 'D' else 3
+            trend_data['moving_avg'] = trend_data[metric].rolling(window=window, min_periods=1).mean()
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(
+                x=trend_data[self.date_col], y=trend_data[metric],
+                mode='lines' if grain == 'D' else 'lines+markers', name=grain_name,
+                line=dict(color='#6366f1', width=1 if grain == 'D' else 2), opacity=0.8
+            ))
+            fig.add_trace(go.Scatter(
+                x=trend_data[self.date_col], y=trend_data['moving_avg'],
+                mode='lines', name=f'{window}-period average', line=dict(color='#10b981', width=2)
+            ))
+            fig.update_layout(title=f'{grain_name} {label}')
+        fig.update_layout(template='plotly_dark', paper_bgcolor='rgba(0,0,0,0)',
+                          plot_bgcolor='rgba(0,0,0,0)', hovermode='x unified')
+
+        # Growth: first vs last week of days, or first vs last complete period.
+        # Periods the data only partly covers (e.g. a month starting mid-way) are skipped.
+        totals = trend_data.groupby(self.date_col)[metric].sum() if group else trend_data.set_index(self.date_col)[metric]
+        if grain != 'D' and len(totals) > 2:
+            dates = self.data[self.date_col]
+            if dates.min() > totals.index[0]:
+                totals = totals.iloc[1:]
+            next_start = totals.index[-1] + pd.tseries.frequencies.to_offset(grain)
+            if dates.max() < next_start - pd.Timedelta(days=1):
+                totals = totals.iloc[:-1]
+        span = 7 if grain == 'D' else 1
+        period = {'D': 'week', 'W': 'complete week', 'MS': 'complete month',
+                  'QS': 'complete quarter', 'YS': 'complete year'}[grain]
+
         result['figure'] = fig
         result['data'] = trend_data
-        result['text'] = f"## 📈 Trend Analysis: {metric.replace('_', ' ').title()}"
-        result['narrative'] = f"**{metric.replace('_', ' ').title()}** shows an overall {'increase' if growth > 0 else 'decrease'} of **{abs(growth):.1f}%** over the analysis period. "
-        
-        if abs(growth) > 20:
-            result['narrative'] += f"This is a significant {'upward' if growth > 0 else 'downward'} trend that warrants attention."
-        
+        by_text = f" by {group.replace('_', ' ').title()}" if group else ""
+        result['text'] = f"## 📈 {grain_name} Trend: {label}{by_text}{self._filter_suffix(intent)}"
+
+        if len(totals) < 2 * span:
+            unit = 'day' if grain == 'D' else period
+            result['narrative'] = (
+                f"The data has only {len(totals)} {unit}{'s' if len(totals) != 1 else ''} of "
+                f"{label.lower()}, not enough to measure growth. Try a finer time grain."
+            )
+        else:
+            first_val, last_val = totals.iloc[:span].mean(), totals.iloc[-span:].mean()
+            growth = ((last_val - first_val) / abs(first_val) * 100) if first_val else 0
+            result['narrative'] = (
+                f"**{label}** shows an overall {'increase' if growth > 0 else 'decrease'} of "
+                f"**{abs(growth):.1f}%** from the first to the last {period}. "
+            )
+            if grain != 'D' and len(totals) >= 3:
+                result['narrative'] += (
+                    f"Average change from one {period.replace('complete ', '')} to the next: "
+                    f"**{totals.pct_change().dropna().mean() * 100:+.1f}%**. "
+                )
+            if abs(growth) > 20:
+                result['narrative'] += f"This is a significant {'upward' if growth > 0 else 'downward'} trend that warrants attention."
+
         result['follow_up_suggestions'] = [
             f"Forecast {metric} for next 30 days",
             f"Show {metric} by {self.categorical_cols[0]}" if self.categorical_cols else f"Distribution of {metric}",
-            "What's driving this trend?"
+            f"Monthly {metric} trend by {self.categorical_cols[0]}" if self.categorical_cols else f"Weekly {metric} trend",
         ]
-        
+
         return result
     
     def _handle_correlation_query(self, intent: Dict, result: Dict) -> Dict:
-        """Handle correlation analysis queries."""
+        """Handle correlation analysis between the two columns asked about."""
         if len(self.numeric_cols) < 2:
             result['text'] = "Need at least 2 numeric columns for correlation analysis."
             return result
-        
+
         col1 = intent.get('metric') or self.numeric_cols[0]
-        col2 = self.numeric_cols[1] if len(self.numeric_cols) > 1 else col1
-        
-        correlation = self.df[col1].corr(self.df[col2])
-        
+        col2 = intent.get('metric2') or next(c for c in self.numeric_cols if c != col1)
+        correlation = self.data[col1].corr(self.data[col2])
+
         fig = px.scatter(
-            self.df, x=col1, y=col2,
+            self.data, x=col1, y=col2,
             trendline='ols',
             title=f'Correlation: {col1} vs {col2} (r={correlation:.3f})',
             color_discrete_sequence=['#6366f1']
@@ -363,16 +280,16 @@ class SmartQueryEngine:
             paper_bgcolor='rgba(0,0,0,0)',
             plot_bgcolor='rgba(0,0,0,0)'
         )
-        
+
         result['figure'] = fig
-        result['text'] = "## 🔗 Correlation Analysis"
-        
+        result['text'] = f"## 🔗 Correlation Analysis{self._filter_suffix(intent)}"
+
         strength = "very strong" if abs(correlation) > 0.8 else "strong" if abs(correlation) > 0.6 else "moderate" if abs(correlation) > 0.4 else "weak"
         direction = "positive" if correlation > 0 else "negative"
-        
+
         result['narrative'] = f"The correlation between **{col1.replace('_', ' ').title()}** and **{col2.replace('_', ' ').title()}** is **{strength} {direction}** (r = {correlation:.3f}). "
         result['narrative'] += f"This means {'when one increases, the other tends to increase' if correlation > 0 else 'when one increases, the other tends to decrease'}."
-        
+
         return result
     
     def _handle_distribution_query(self, intent: Dict, result: Dict) -> Dict:
@@ -385,12 +302,12 @@ class SmartQueryEngine:
         
         fig = go.Figure()
         fig.add_trace(go.Histogram(
-            x=self.df[metric], nbinsx=50,
+            x=self.data[metric], nbinsx=50,
             marker=dict(color='#6366f1', line=dict(color='#818cf8', width=1))
         ))
         
-        mean_val = self.df[metric].mean()
-        median_val = self.df[metric].median()
+        mean_val = self.data[metric].mean()
+        median_val = self.data[metric].median()
         
         fig.add_vline(x=mean_val, line_dash="solid", line_color="#10b981",
                      annotation_text=f"Mean: {mean_val:,.2f}")
@@ -407,8 +324,8 @@ class SmartQueryEngine:
         result['figure'] = fig
         result['text'] = f"## 📊 Distribution Analysis: {metric.replace('_', ' ').title()}"
         
-        skewness = self.df[metric].skew()
-        result['narrative'] = f"The distribution of **{metric.replace('_', ' ')}** ranges from {self.df[metric].min():,.2f} to {self.df[metric].max():,.2f}. "
+        skewness = self.data[metric].skew()
+        result['narrative'] = f"The distribution of **{metric.replace('_', ' ')}** ranges from {self.data[metric].min():,.2f} to {self.data[metric].max():,.2f}. "
         result['narrative'] += f"Mean: {mean_val:,.2f}, Median: {median_val:,.2f}. "
         result['narrative'] += f"The distribution is {'right-skewed' if skewness > 0.5 else 'left-skewed' if skewness < -0.5 else 'approximately normal'} (skewness: {skewness:.2f})."
         
@@ -422,18 +339,18 @@ class SmartQueryEngine:
             result['text'] = "No numeric column found for anomaly detection."
             return result
         
-        Q1 = self.df[metric].quantile(0.25)
-        Q3 = self.df[metric].quantile(0.75)
+        Q1 = self.data[metric].quantile(0.25)
+        Q3 = self.data[metric].quantile(0.75)
         IQR = Q3 - Q1
         
         lower = Q1 - 1.5 * IQR
         upper = Q3 + 1.5 * IQR
         
-        anomalies = self.df[(self.df[metric] < lower) | (self.df[metric] > upper)]
+        anomalies = self.data[(self.data[metric] < lower) | (self.data[metric] > upper)]
         
         fig = go.Figure()
         fig.add_trace(go.Scatter(
-            x=list(range(len(self.df))), y=self.df[metric],
+            x=self.data.index, y=self.data[metric],
             mode='markers', name='Normal',
             marker=dict(color='#6366f1', size=4)
         ))
@@ -458,7 +375,7 @@ class SmartQueryEngine:
         result['figure'] = fig
         result['data'] = anomalies.head(20)
         result['text'] = f"## ⚠️ Anomaly Detection: {metric.replace('_', ' ').title()}"
-        result['narrative'] = f"Found **{len(anomalies):,}** anomalies ({len(anomalies)/len(self.df)*100:.1f}% of data) in **{metric.replace('_', ' ')}**. "
+        result['narrative'] = f"Found **{len(anomalies):,}** anomalies ({len(anomalies)/len(self.data)*100:.1f}% of data) in **{metric.replace('_', ' ')}**. "
         result['narrative'] += f"Values outside the range [{lower:,.2f}, {upper:,.2f}] are flagged as outliers."
         
         return result
@@ -471,82 +388,71 @@ class SmartQueryEngine:
         return result
     
     def _handle_aggregation_query(self, intent: Dict, result: Dict) -> Dict:
-        """Handle aggregation queries (sum, avg, etc.)."""
-        metric = intent['metric'] or (self.numeric_cols[0] if self.numeric_cols else None)
+        """Handle aggregations: totals, averages, counts, top/bottom N, one or two groupings."""
         agg_type = intent['aggregation'] or 'sum'
-        groupby = intent['groupby']
-        
-        if not metric:
-            # Count query
-            if agg_type == 'count':
-                if groupby:
-                    data = self.df.groupby(groupby).size().reset_index(name='count')
-                    data = data.sort_values('count', ascending=False)
-                    
-                    fig = px.bar(data, x=groupby, y='count', color='count',
-                               color_continuous_scale='Viridis',
-                               title=f'Count by {groupby.replace("_", " ").title()}')
-                    fig.update_layout(template='plotly_dark', paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
-                    
-                    result['figure'] = fig
-                    result['data'] = data
-                    result['text'] = f"## 📊 Count by {groupby.replace('_', ' ').title()}"
-                else:
-                    result['text'] = f"Total count: **{len(self.df):,}** records"
+        groups = [g for g in (intent['groupby'], intent['groupby2']) if g]
+        if not groups and intent['limit'] and self.categorical_cols:
+            groups = [self.categorical_cols[0]]  # "top 5 by sales" needs something to rank
+        suffix = self._filter_suffix(intent)
+        data_rows = self.data
+
+        if agg_type == 'count':
+            metric, value_col = None, 'count'
+            if not groups:
+                result['text'] = f"## 📊 Count{suffix}: **{len(data_rows):,}** records"
+                result['data'] = len(data_rows)
                 return result
-            else:
+            data = data_rows.groupby(groups).size().reset_index(name='count')
+            title = f"Count by {' and '.join(g.replace('_', ' ').title() for g in groups)}"
+        else:
+            metric = intent['metric'] or (self.numeric_cols[0] if self.numeric_cols else None)
+            if not metric:
                 result['text'] = "Please specify a numeric column for aggregation."
                 return result
-        
-        # Apply filters
-        df_filtered = self.df.copy()
-        for f in intent['filters']:
-            if f['column'] in df_filtered.columns:
-                df_filtered = df_filtered[df_filtered[f['column']].astype(str).str.lower() == f['value'].lower()]
-        
-        if groupby:
-            # Grouped aggregation
-            agg_func = {'sum': 'sum', 'average': 'mean', 'mean': 'mean', 'max': 'max', 'min': 'min', 'count': 'count', 'median': 'median'}
-            
-            data = df_filtered.groupby(groupby)[metric].agg(agg_func.get(agg_type, 'sum')).reset_index()
-            data.columns = [groupby, metric]
-            data = data.sort_values(metric, ascending=(intent['sort_order'] == 'asc'))
-            
-            if intent['limit']:
+            value_col = metric
+            func = {'sum': 'sum', 'average': 'mean', 'max': 'max', 'min': 'min', 'median': 'median'}[agg_type]
+            label = f"{agg_type.title()} of {metric.replace('_', ' ').title()}"
+            if not groups:
+                value = data_rows[metric].agg(func)
+                result['text'] = f"## 📊 {label}{suffix}: **{format_number(value)}**"
+                result['data'] = value
+                return result
+            data = data_rows.groupby(groups)[metric].agg(func).reset_index()
+            title = f"{label} by {' and '.join(g.replace('_', ' ').title() for g in groups)}"
+
+        data = data.sort_values(value_col, ascending=(intent['sort_order'] == 'asc'))
+        if intent['limit']:
+            if len(groups) > 1:
+                keep = (data.groupby(groups[0])[value_col].sum()
+                        .sort_values(ascending=(intent['sort_order'] == 'asc'))
+                        .head(intent['limit']).index)
+                data = data[data[groups[0]].isin(keep)]
+            else:
                 data = data.head(intent['limit'])
-            
-            fig = px.bar(data, x=groupby, y=metric, color=metric,
-                        color_continuous_scale='Viridis',
-                        title=f'{agg_type.title()} of {metric.replace("_", " ").title()} by {groupby.replace("_", " ").title()}')
-            fig.update_layout(template='plotly_dark', paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
-            
-            result['figure'] = fig
-            result['data'] = data
-            result['text'] = f"## 📊 {agg_type.title()} of {metric.replace('_', ' ').title()} by {groupby.replace('_', ' ').title()}"
-            
-            # Narrative
-            top_row = data.iloc[0] if intent['sort_order'] == 'desc' else data.iloc[-1]
-            bottom_row = data.iloc[-1] if intent['sort_order'] == 'desc' else data.iloc[0]
-            
-            result['narrative'] = f"**{top_row[groupby]}** leads with {format_number(top_row[metric])} in {metric.replace('_', ' ')}, "
-            result['narrative'] += f"while **{bottom_row[groupby]}** has the lowest at {format_number(bottom_row[metric])}."
-            
+            ranking = 'Top' if intent['sort_order'] == 'desc' else 'Bottom'
+            title = f"{ranking} {intent['limit']}: {title}"
+
+        if len(groups) > 1:
+            fig = px.bar(data, x=groups[0], y=value_col, color=groups[1], barmode='group', title=title)
         else:
-            # Simple aggregation
-            agg_funcs = {
-                'sum': df_filtered[metric].sum(),
-                'average': df_filtered[metric].mean(),
-                'mean': df_filtered[metric].mean(),
-                'max': df_filtered[metric].max(),
-                'min': df_filtered[metric].min(),
-                'count': df_filtered[metric].count(),
-                'median': df_filtered[metric].median()
-            }
-            
-            value = agg_funcs.get(agg_type, df_filtered[metric].sum())
-            result['text'] = f"## 📊 {agg_type.title()} of {metric.replace('_', ' ').title()}: **{format_number(value)}**"
-            result['data'] = value
-        
+            fig = px.bar(data, x=groups[0], y=value_col, color=value_col,
+                         color_continuous_scale='Viridis', title=title)
+        fig.update_layout(template='plotly_dark', paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
+
+        result['figure'] = fig
+        result['data'] = data
+        result['text'] = f"## 📊 {title}{suffix}"
+
+        if len(groups) == 1 and len(data) > 0:
+            ordered = data.sort_values(value_col, ascending=False)
+            top_row, bottom_row = ordered.iloc[0], ordered.iloc[-1]
+            what = 'records' if agg_type == 'count' else metric.replace('_', ' ')
+            result['narrative'] = f"**{top_row[groups[0]]}** leads with {format_number(top_row[value_col])} {what}"
+            if len(ordered) > 1:
+                result['narrative'] += f", while **{bottom_row[groups[0]]}** has the lowest at {format_number(bottom_row[value_col])}."
+            else:
+                result['narrative'] += "."
+
         return result
     
     def _handle_default_query(self, query: str, result: Dict) -> Dict:
