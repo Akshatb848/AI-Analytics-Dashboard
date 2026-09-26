@@ -1,5 +1,7 @@
 """Time series forecasting with Prophet."""
-from typing import Any, Dict
+from typing import Any, Dict, Optional
+
+import numpy as np
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -24,18 +26,102 @@ class PredictiveEngine:
         prophet_df['ds'] = pd.to_datetime(prophet_df['ds'])
         return prophet_df.sort_values('ds')
     
-    def train_model(self, yearly_seasonality: bool = True, 
-                   weekly_seasonality: bool = True,
-                   daily_seasonality: bool = False) -> None:
-        prophet_df = self.prepare_data()
-        self.model = Prophet(
+    @staticmethod
+    def _new_model(yearly_seasonality: bool, weekly_seasonality: bool, daily_seasonality: bool) -> Prophet:
+        return Prophet(
             yearly_seasonality=yearly_seasonality,
             weekly_seasonality=weekly_seasonality,
             daily_seasonality=daily_seasonality,
             interval_width=0.95,
             changepoint_prior_scale=0.05
         )
+
+    def train_model(self, yearly_seasonality: bool = True, 
+                   weekly_seasonality: bool = True,
+                   daily_seasonality: bool = False) -> None:
+        prophet_df = self.prepare_data()
+        self.model = self._new_model(yearly_seasonality, weekly_seasonality, daily_seasonality)
         self.model.fit(prophet_df)
+
+    def backtest(self, horizon_days: int = 30, yearly_seasonality: bool = True,
+                 weekly_seasonality: bool = True) -> Optional[Dict[str, Any]]:
+        """Hold back the most recent stretch of history, forecast it, and score the forecast.
+
+        The held-back window is the forecast horizon, capped at a quarter of the history.
+        Returns None when there is too little data to test meaningfully.
+        """
+        data = self.prepare_data()
+        if len(data) < 40:
+            return None
+        span_days = (data['ds'].max() - data['ds'].min()).days
+        holdout_days = max(7, min(horizon_days, span_days // 4))
+        cutoff = data['ds'].max() - pd.Timedelta(days=holdout_days)
+        train, test = data[data['ds'] <= cutoff], data[data['ds'] > cutoff]
+        if len(train) < 30 or len(test) < 5:
+            return None
+
+        model = self._new_model(yearly_seasonality, weekly_seasonality, False)
+        model.fit(train)
+        predicted = model.predict(test[['ds']])
+
+        actual = test['y'].to_numpy()
+        yhat = predicted['yhat'].to_numpy()
+        errors = np.abs(actual - yhat)
+        nonzero = actual != 0
+        mape = float(np.mean(errors[nonzero] / np.abs(actual[nonzero])) * 100) if nonzero.any() else None
+        coverage = float(np.mean((actual >= predicted['yhat_lower'].to_numpy()) &
+                                 (actual <= predicted['yhat_upper'].to_numpy())) * 100)
+        # Naive baseline: predict the average of the last `holdout_days` of training data
+        baseline = train[train['ds'] > cutoff - pd.Timedelta(days=holdout_days)]['y'].mean()
+        baseline_mae = float(np.mean(np.abs(actual - baseline)))
+        mae = float(errors.mean())
+
+        return {
+            'holdout_days': int(holdout_days),
+            'train_points': int(len(train)),
+            'test_points': int(len(test)),
+            'mae': mae,
+            'mape': mape,
+            'interval_coverage': coverage,
+            'baseline_mae': baseline_mae,
+            'improvement_vs_baseline': float((1 - mae / baseline_mae) * 100) if baseline_mae else None,
+            'comparison': pd.DataFrame({
+                'Date': test['ds'].to_numpy(), 'Actual': actual, 'Forecast': yhat,
+                'Lower': predicted['yhat_lower'].to_numpy(), 'Upper': predicted['yhat_upper'].to_numpy(),
+            }),
+        }
+
+    @staticmethod
+    def rate_accuracy(result: Dict[str, Any]) -> str:
+        """Plain-language verdict on a backtest."""
+        mape, gain = result['mape'], result['improvement_vs_baseline']
+        if gain is not None and gain <= 0:
+            return ("No better than a naive guess (the recent average) on held-back data. "
+                    "Treat this forecast as rough.")
+        if mape is None:
+            return "Accuracy percentage can't be computed because the actual values include zeros."
+        level = "good" if mape < 10 else "fair" if mape < 25 else "low"
+        return (f"Accuracy is {level}: typical error {mape:.1f}% on the last {result['holdout_days']} days, "
+                f"{gain:.0f}% better than a naive guess.")
+
+    @staticmethod
+    def plot_backtest(result: Dict[str, Any]) -> go.Figure:
+        data = result['comparison']
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=pd.concat([data['Date'], data['Date'][::-1]]),
+            y=pd.concat([data['Upper'], data['Lower'][::-1]]),
+            fill='toself', fillcolor='rgba(16, 185, 129, 0.15)',
+            line=dict(color='rgba(255,255,255,0)'), name='95% interval'
+        ))
+        fig.add_trace(go.Scatter(x=data['Date'], y=data['Actual'], mode='lines+markers',
+                                 name='Actual', line=dict(color='#6366f1')))
+        fig.add_trace(go.Scatter(x=data['Date'], y=data['Forecast'], mode='lines',
+                                 name='Forecast (trained without these days)', line=dict(color='#10b981')))
+        fig.update_layout(template='plotly_dark', paper_bgcolor='rgba(0,0,0,0)',
+                          plot_bgcolor='rgba(0,0,0,0)', hovermode='x unified', height=400,
+                          title='Backtest: forecast vs. what actually happened')
+        return fig
     
     def make_forecast(self, periods: int = 30, freq: str = 'D') -> pd.DataFrame:
         if self.model is None:

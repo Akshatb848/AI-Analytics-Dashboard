@@ -805,6 +805,32 @@ def main():
                         with cols[3]:
                             st.metric("Confidence ±", format_number(summary['confidence_interval']))
                         
+                        with st.spinner("Checking accuracy on held-back data..."):
+                            accuracy = pred_engine.backtest(forecast_days, yearly_seasonality=yearly,
+                                                            weekly_seasonality=weekly)
+                        st.markdown("#### 🎯 How reliable is this forecast?")
+                        if accuracy is None:
+                            st.info("Not enough history to test accuracy (needs at least ~40 dates).")
+                        else:
+                            verdict = PredictiveEngine.rate_accuracy(accuracy)
+                            (st.success if "good" in verdict else st.warning)(verdict)
+                            acc_cols = st.columns(3)
+                            with acc_cols[0]:
+                                st.metric("Typical error (MAPE)",
+                                          "n/a" if accuracy['mape'] is None else f"{accuracy['mape']:.1f}%")
+                            with acc_cols[1]:
+                                st.metric("Inside 95% band", f"{accuracy['interval_coverage']:.0f}%",
+                                          help="Share of held-back days whose actual value fell inside the forecast band.")
+                            with acc_cols[2]:
+                                gain = accuracy['improvement_vs_baseline']
+                                st.metric("vs. naive guess", "n/a" if gain is None else f"{gain:+.0f}%",
+                                          help="Error reduction compared with predicting the recent average.")
+                            with st.expander("See the backtest"):
+                                st.caption(f"Trained on data up to {accuracy['holdout_days']} days before the "
+                                           f"end, then compared with the {accuracy['test_points']} held-back dates.")
+                                st.plotly_chart(PredictiveEngine.plot_backtest(accuracy), width="stretch",
+                                                key="backtest_chart")
+
                         with st.expander("📊 Forecast Components"):
                             fig_comp = pred_engine.plot_components()
                             st.plotly_chart(fig_comp, width="stretch")

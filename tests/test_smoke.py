@@ -65,6 +65,7 @@ def test_forecast_generates():
     button(at, "🔮 Generate Forecast").click().run()
     assert_no_errors(at)
     assert any(m.label == "Predicted Avg" for m in at.metric)
+    assert any(m.label == "Typical error (MAPE)" for m in at.metric)
 
 
 def test_dashboard_card_can_be_removed():
