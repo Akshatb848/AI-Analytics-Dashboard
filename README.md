@@ -207,7 +207,19 @@ print(f"Access your app at: {public_url}")
 
 ```
 ai-analytics-dashboard/
-├── app.py                 # Main Streamlit application
+├── app.py                 # Streamlit page: layout, session state, caching
+├── analytics/
+│   ├── data_utils.py      # Type detection, cleaning, quality score, sample data
+│   ├── preprocessing.py   # Data Tools operations (missing values, outliers, date features)
+│   ├── insights.py        # Automated insights and narratives
+│   ├── query_engine.py    # Ask Data question answering
+│   ├── forecasting.py     # Prophet forecasts
+│   ├── visualization.py   # Overview charts
+│   ├── reports.py         # Markdown / HTML / CSV reports
+│   └── formatting.py      # HTML escaping and number formatting
+├── ui/
+│   ├── styles.py          # Custom CSS
+│   └── components.py      # Tutorial and small UI helpers
 ├── semantic_engine.py     # Column profiling and semantic catalog
 ├── requirements.txt       # Python dependencies (pinned)
 ├── requirements-dev.txt   # Test dependencies
