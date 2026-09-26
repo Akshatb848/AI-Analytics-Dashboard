@@ -35,6 +35,7 @@ from analytics.preprocessing import DataPreprocessor
 from analytics.query_engine import SmartQueryEngine
 from analytics.reports import ReportGenerator
 from analytics.visualization import VisualizationBuilder
+from ui import auth
 from ui.components import render_tutorial
 from ui.styles import CUSTOM_CSS
 import logging
@@ -342,6 +343,8 @@ def answer_question(df: pd.DataFrame, fingerprint: str, query: str, numeric_cols
 
 def main():
     """Main application entry point."""
+    # Sign-in gate; does nothing unless [auth] is configured in secrets
+    auth.require_login()
     
     # Header
     st.markdown("""

@@ -336,6 +336,33 @@ rows**. If the key is missing, the API is unreachable or rate-limited, or the re
 the built-in parser answers and the app says so. A toggle in the Ask Data tab turns GLM off, and
 "How this was answered" shows the plan that ran.
 
+### Sign-in (optional)
+
+The dashboard is open to anyone who can reach it unless sign-in is configured. It uses
+Streamlit's built-in OpenID Connect support, so any OIDC provider works (Google, Microsoft
+Entra ID, Auth0, Okta, ...). Add an `[auth]` section to `.streamlit/secrets.toml` (or the
+Secrets settings on Streamlit Cloud). Example for Google:
+
+```toml
+[auth]
+redirect_uri = "https://your-app-url/oauth2callback"   # http://localhost:8501/oauth2callback locally
+cookie_secret = "a-long-random-string"                  # e.g. python -c "import secrets; print(secrets.token_hex(32))"
+client_id = "your-client-id.apps.googleusercontent.com"
+client_secret = "your-client-secret"
+server_metadata_url = "https://accounts.google.com/.well-known/openid-configuration"
+
+# Optional: limit who gets in (environment variables work too)
+ALLOWED_EMAIL_DOMAINS = "yourcompany.com"
+# ALLOWED_EMAILS = "ana@example.com,raj@example.com"
+```
+
+With `[auth]` present, visitors see a sign-in page first; signed-in users see their email and a
+**Sign out** button in the sidebar. Without an allow-list, anyone who can sign in with the
+provider gets access, so set `ALLOWED_EMAIL_DOMAINS` or `ALLOWED_EMAILS` for private data.
+With Docker, mount the secrets file at runtime
+(`-v "$PWD/.streamlit/secrets.toml:/app/.streamlit/secrets.toml:ro"`); it is never copied into
+the image.
+
 ### Custom Theming
 
 Edit `.streamlit/config.toml`:
