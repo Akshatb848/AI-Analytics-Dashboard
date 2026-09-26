@@ -824,8 +824,6 @@ def main():
     with tab4:
         st.markdown("### 💬 Ask Your Data")
         
-        st.markdown('<div class="query-container">', unsafe_allow_html=True)
-
         glm = llm_config()
         if glm is not None:
             use_llm = st.toggle(f"Use {glm.model} to interpret questions", value=True, key="use_llm")
@@ -853,7 +851,6 @@ def main():
                 if st.button(sugg, key=f"sugg_{i}", width="stretch"):
                     query = sugg
         
-        st.markdown('</div>', unsafe_allow_html=True)
         
         if query:
             with st.spinner("🔍 Processing..."):

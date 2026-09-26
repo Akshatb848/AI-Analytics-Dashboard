@@ -115,6 +115,20 @@ print(f"Access your app at: {public_url}")
 
 ## ☁️ Deployment Options
 
+### Docker (any host)
+
+```bash
+docker build -t ai-analytics-dashboard .
+docker run -d -p 8501:8501 \
+  -e ZAI_API_KEY="your-key" \
+  ai-analytics-dashboard
+```
+
+The app is served on port 8501 and runs as a non-root user. The image has a health check on
+Streamlit's `/_stcore/health` endpoint (`docker inspect -f '{{.State.Health.Status}}' <container>`),
+which load balancers and orchestrators can also poll. `ZAI_API_KEY` is optional; secrets files are
+excluded from the image by `.dockerignore`, so pass keys at runtime.
+
 ### Option 1: Streamlit Cloud (Recommended - Free)
 
 1. **Push to GitHub:**
@@ -227,6 +241,7 @@ ai-analytics-dashboard/
 ├── .streamlit/
 │   └── config.toml       # Streamlit configuration
 ├── README.md             # Documentation
+├── Dockerfile            # Production image with health check
 ├── Procfile              # For Railway/Heroku
 └── .gitignore            # Git ignore file
 ```
