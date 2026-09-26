@@ -235,3 +235,11 @@ def test_fingerprint_detects_a_single_changed_value_in_a_large_frame():
     changed.loc[123_456, "x"] = -1.0
     assert dashboard.data_fingerprint(df) != dashboard.data_fingerprint(changed)
     assert dashboard.data_fingerprint(df) == dashboard.data_fingerprint(df.copy())
+
+
+def test_narratives_render_bold_and_line_breaks_after_escaping():
+    from analytics.formatting import narrative_html
+    assert narrative_html("**West** leads\n\nsee <b>this</b>") == (
+        "<strong>West</strong> leads<br><br>see &lt;b&gt;this&lt;/b&gt;"
+    )
+    assert narrative_html(f"**{XSS}**") == "<strong>&lt;img src=x onerror=alert(1)&gt;</strong>"

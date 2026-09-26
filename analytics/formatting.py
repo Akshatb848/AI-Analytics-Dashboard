@@ -25,6 +25,11 @@ def _markdown_bold_to_html(text: str) -> str:
     return re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", text)
 
 
+def narrative_html(text: Any) -> str:
+    """Escape a narrative for a raw-HTML card, then render its **bold** and line breaks."""
+    return _markdown_bold_to_html(safe_html(text)).replace("\n", "<br>")
+
+
 def format_number(num: float) -> str:
     """Format numbers for display."""
     if pd.isna(num):

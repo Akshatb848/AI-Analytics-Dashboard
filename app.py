@@ -25,8 +25,9 @@ from analytics.data_utils import (  # noqa: F401  (re-exported for tests and cal
     sanitize_dataframe,
     semantic_catalog_template,
 )
+from analytics.dashboards import DashboardFileError, export_dashboards, import_dashboards
 from analytics.forecasting import PredictiveEngine
-from analytics.formatting import format_number, safe_html
+from analytics.formatting import format_number, narrative_html, safe_html
 from analytics.insights import EnhancedInsightsEngine, NarrativeEngine  # noqa: F401
 from analytics.llm import GLMClient, LLMConfig, LLMError, LLMQueryPlanner, describe_schema
 from analytics.query_parser import normalize_intent
@@ -41,6 +42,7 @@ import streamlit as st
 import pandas as pd
 import json
 import hashlib
+from datetime import datetime
 import os
 from io import BytesIO
 from typing import Optional, Tuple, List, Dict, Any
@@ -738,7 +740,7 @@ def main():
                         <span class="insight-icon">{safe_html(insight['icon'])}</span>
                         <span class="insight-title">{safe_html(insight['title'])}</span>
                         <div class="insight-description">{safe_html(insight['description'])}</div>
-                        <div class="insight-narrative">{safe_html(insight.get('narrative', ''))}</div>
+                        <div class="insight-narrative">{narrative_html(insight.get('narrative', ''))}</div>
                     </div>
                     """, unsafe_allow_html=True)
             
@@ -891,7 +893,7 @@ def main():
                     st.markdown(f"""
                     <div class="narrative-card">
                         <h4>💡 Analysis</h4>
-                        <p>{safe_html(result['narrative'])}</p>
+                        <p>{narrative_html(result['narrative'])}</p>
                     </div>
                     """, unsafe_allow_html=True)
                 
@@ -1115,6 +1117,34 @@ def main():
         st.markdown("### 🗂️ Executive Dashboards")
         st.caption("Curate AI-generated cards for stakeholder-ready dashboards.")
 
+        # Cards live in the browser session; a file keeps them across sessions and machines
+        save_col, restore_col = st.columns(2)
+        with save_col:
+            if st.session_state.saved_dashboards:
+                st.download_button(
+                    "💾 Download dashboard (.json)",
+                    export_dashboards(st.session_state.saved_dashboards),
+                    f"dashboard_{datetime.now():%Y%m%d_%H%M}.json",
+                    "application/json",
+                    width="stretch",
+                    help="Save all cards to a file you can restore later.",
+                )
+        with restore_col:
+            restore_file = st.file_uploader("Restore a saved dashboard", type=["json"],
+                                            key="dashboard_restore")
+            if restore_file is not None:
+                content = restore_file.getvalue()
+                file_id = hashlib.sha256(content).hexdigest()
+                # The uploader keeps the file across reruns; import each file only once
+                if st.session_state.get("restored_dashboard_file") != file_id:
+                    try:
+                        restored = import_dashboards(content.decode("utf-8"))
+                        st.session_state.saved_dashboards.extend(restored)
+                        st.session_state.restored_dashboard_file = file_id
+                        st.success(f"✅ Restored {len(restored)} card{'s' if len(restored) != 1 else ''}.")
+                    except (DashboardFileError, UnicodeDecodeError) as e:
+                        st.error(f"❌ Couldn't restore this file: {e}")
+
         if not st.session_state.saved_dashboards:
             st.info("No dashboard cards yet. Save insights from the Ask Data tab.")
         else:
@@ -1127,7 +1157,7 @@ def main():
                         st.markdown(f"""
                         <div class="narrative-card">
                             <h4>💡 Business Insight</h4>
-                            <p>{safe_html(card['summary'])}</p>
+                            <p>{narrative_html(card['summary'])}</p>
                         </div>
                         """, unsafe_allow_html=True)
                     if card.get("figure") is not None:
