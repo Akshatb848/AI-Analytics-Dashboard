@@ -37,3 +37,21 @@ jobs:
             requirements-dev.txt
       - run: pip install -r requirements-dev.txt
       - run: pytest
+
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t ai-analytics-dashboard .
+      - name: Start the container and wait until it reports healthy
+        run: |
+          docker run -d --name dashboard -p 8501:8501 ai-analytics-dashboard
+          for i in $(seq 1 40); do
+            status=$(docker inspect -f '{{.State.Health.Status}}' dashboard)
+            echo "health: $status"
+            [ "$status" = healthy ] && exit 0
+            sleep 3
+          done
+          docker logs dashboard
+          exit 1

@@ -27,11 +27,11 @@ A comprehensive analytics platform featuring automated insights, predictive anal
 - Exportable forecast data
 
 ### 💬 **Natural Language Queries**
-- Ask questions in plain English
-- Automatic query interpretation
-- Dynamic visualization generation
-- Support for aggregations, filters, and comparisons
-- Example queries for guidance
+- Ask questions in plain English, answered with a chart, table and short explanation
+- Totals, averages, counts, top/bottom N, one or two groupings ("sales by region and channel")
+- Filters by category value, number or year ("average profit in North where discount >= 0.2 in 2025")
+- Trends by day, week, month, quarter or year, correlations, distributions and outliers
+- Optional **GLM-4.5-Flash** (Z.ai, free tier) to interpret free-form questions — see below
 
 ### 🧠 **Semantic Catalog (Governed Metrics)**
 - Upload a JSON semantic catalog to define metrics, dimensions, and time grains
@@ -114,6 +114,20 @@ print(f"Access your app at: {public_url}")
 ---
 
 ## ☁️ Deployment Options
+
+### Docker (any host)
+
+```bash
+docker build -t ai-analytics-dashboard .
+docker run -d -p 8501:8501 \
+  -e ZAI_API_KEY="your-key" \
+  ai-analytics-dashboard
+```
+
+The app is served on port 8501 and runs as a non-root user. The image has a health check on
+Streamlit's `/_stcore/health` endpoint (`docker inspect -f '{{.State.Health.Status}}' <container>`),
+which load balancers and orchestrators can also poll. `ZAI_API_KEY` is optional; secrets files are
+excluded from the image by `.dockerignore`, so pass keys at runtime.
 
 ### Option 1: Streamlit Cloud (Recommended - Free)
 
@@ -207,7 +221,19 @@ print(f"Access your app at: {public_url}")
 
 ```
 ai-analytics-dashboard/
-├── app.py                 # Main Streamlit application
+├── app.py                 # Streamlit page: layout, session state, caching
+├── analytics/
+│   ├── data_utils.py      # Type detection, cleaning, quality score, sample data
+│   ├── preprocessing.py   # Data Tools operations (missing values, outliers, date features)
+│   ├── insights.py        # Automated insights and narratives
+│   ├── query_engine.py    # Ask Data question answering
+│   ├── forecasting.py     # Prophet forecasts
+│   ├── visualization.py   # Overview charts
+│   ├── reports.py         # Markdown / HTML / CSV reports
+│   └── formatting.py      # HTML escaping and number formatting
+├── ui/
+│   ├── styles.py          # Custom CSS
+│   └── components.py      # Tutorial and small UI helpers
 ├── semantic_engine.py     # Column profiling and semantic catalog
 ├── requirements.txt       # Python dependencies (pinned)
 ├── requirements-dev.txt   # Test dependencies
@@ -215,6 +241,7 @@ ai-analytics-dashboard/
 ├── .streamlit/
 │   └── config.toml       # Streamlit configuration
 ├── README.md             # Documentation
+├── Dockerfile            # Production image with health check
 ├── Procfile              # For Railway/Heroku
 └── .gitignore            # Git ignore file
 ```
@@ -274,6 +301,67 @@ ai-analytics-dashboard/
 | `MAX_UPLOAD_ROWS` | Maximum rows read from an uploaded file; larger files are truncated with a warning | 200000 |
 
 Uploads are limited to 50 MB via `server.maxUploadSize` in `.streamlit/config.toml`.
+
+### GLM-4.5-Flash for Ask Data (optional)
+
+Without an API key, Ask Data uses the built-in rule-based parser. With a Z.ai key, questions
+are interpreted by **GLM-4.5-Flash** (free, rate-limited), which handles freer phrasing.
+
+1. Create an API key at [z.ai](https://z.ai) (API keys page of the Z.ai open platform).
+2. Provide it as `ZAI_API_KEY`, either as an environment variable:
+
+   ```bash
+   export ZAI_API_KEY="your-key"
+   streamlit run app.py
+   ```
+
+   or in `.streamlit/secrets.toml` (already in `.gitignore`; on Streamlit Cloud use the app's
+   **Secrets** settings instead):
+
+   ```toml
+   ZAI_API_KEY = "your-key"
+   ```
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `ZAI_API_KEY` | Z.ai API key; enables GLM in Ask Data | not set |
+| `ZAI_MODEL` | Model name | `glm-4.5-flash` |
+| `ZAI_BASE_URL` | API base URL. Keys from the GLM Coding Plan use `https://api.z.ai/api/coding/paas/v4` | `https://api.z.ai/api/paas/v4` |
+
+**How it works and what is sent.** The model only turns the question into a query plan (which
+columns, filters, grouping, aggregation); the app validates that plan against your columns and
+runs it with pandas, so the model never executes code. Z.ai receives the question plus column
+names, column types, up to 15 values per category column and the date range — **never the data
+rows**. If the key is missing, the API is unreachable or rate-limited, or the reply can't be used,
+the built-in parser answers and the app says so. A toggle in the Ask Data tab turns GLM off, and
+"How this was answered" shows the plan that ran.
+
+### Sign-in (optional)
+
+The dashboard is open to anyone who can reach it unless sign-in is configured. It uses
+Streamlit's built-in OpenID Connect support, so any OIDC provider works (Google, Microsoft
+Entra ID, Auth0, Okta, ...). Add an `[auth]` section to `.streamlit/secrets.toml` (or the
+Secrets settings on Streamlit Cloud). Example for Google:
+
+```toml
+[auth]
+redirect_uri = "https://your-app-url/oauth2callback"   # http://localhost:8501/oauth2callback locally
+cookie_secret = "a-long-random-string"                  # e.g. python -c "import secrets; print(secrets.token_hex(32))"
+client_id = "your-client-id.apps.googleusercontent.com"
+client_secret = "your-client-secret"
+server_metadata_url = "https://accounts.google.com/.well-known/openid-configuration"
+
+# Optional: limit who gets in (environment variables work too)
+ALLOWED_EMAIL_DOMAINS = "yourcompany.com"
+# ALLOWED_EMAILS = "ana@example.com,raj@example.com"
+```
+
+With `[auth]` present, visitors see a sign-in page first; signed-in users see their email and a
+**Sign out** button in the sidebar. Without an allow-list, anyone who can sign in with the
+provider gets access, so set `ALLOWED_EMAIL_DOMAINS` or `ALLOWED_EMAILS` for private data.
+With Docker, mount the secrets file at runtime
+(`-v "$PWD/.streamlit/secrets.toml:/app/.streamlit/secrets.toml:ro"`); it is never copied into
+the image.
 
 ### Custom Theming
 

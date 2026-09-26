@@ -7,3 +7,5 @@ prophet==1.4.0
 scipy==1.17.1
 statsmodels==0.15.0  # Plotly OLS trendlines in correlation queries
 openpyxl==3.1.5      # Excel (.xlsx) uploads
+requests==2.33.1     # GLM (Z.ai) API calls for Ask Data
+Authlib==1.8.0       # Optional sign-in (st.login)
