@@ -17,12 +17,13 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from prophet import Prophet
 from datetime import datetime, timedelta
+import html
 import json
 import re
 import hashlib
-import base64
+import os
 from io import BytesIO
-from typing import Optional, Tuple, List, Dict, Any, Union
+from typing import Optional, Tuple, List, Dict, Any
 from scipy import stats
 import warnings
 warnings.filterwarnings('ignore')
@@ -62,6 +63,11 @@ if 'semantic_issues' not in st.session_state:
     st.session_state.semantic_issues = []
 if 'semantic_schema' not in st.session_state:
     st.session_state.semantic_schema = None
+if 'processed_data' not in st.session_state:
+    # Cleaned DataFrames from the Data Tools tab, keyed by dataset
+    st.session_state.processed_data = {}
+if 'processing_log' not in st.session_state:
+    st.session_state.processing_log = {}
 
 # =============================================================================
 # ENHANCED CUSTOM STYLING
@@ -631,6 +637,43 @@ st.markdown("""
 # HELPER FUNCTIONS
 # =============================================================================
 
+def _is_text_dtype(series: pd.Series) -> bool:
+    """True for object and string columns (pandas 3 stores text as StringDtype)."""
+    return pd.api.types.is_object_dtype(series) or pd.api.types.is_string_dtype(series)
+
+
+def _is_numeric_dtype(series: pd.Series) -> bool:
+    """True for numeric columns, excluding booleans."""
+    return pd.api.types.is_numeric_dtype(series) and not pd.api.types.is_bool_dtype(series)
+
+
+def _parse_datetime(series: pd.Series) -> pd.Series:
+    """Parse text to datetimes, returning NaT for values that don't parse."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        return pd.to_datetime(series, errors="coerce", format="mixed")
+
+
+# The only markup the app itself puts in narratives; restored after escaping
+_ALLOWED_NARRATIVE_TAGS = {
+    html.escape("<span class='narrative-highlight'>"): "<span class='narrative-highlight'>",
+    html.escape("</span>"): "</span>",
+}
+
+
+def safe_html(value: Any) -> str:
+    """Escape text for raw-HTML blocks so column names, category values and
+    queries from uploaded data can't inject markup or scripts."""
+    text = html.escape(str(value))
+    for escaped, raw in _ALLOWED_NARRATIVE_TAGS.items():
+        text = text.replace(escaped, raw)
+    return text
+
+
+# Share of non-empty values that must convert for a text column to be retyped
+TYPE_CONVERSION_THRESHOLD = 0.9
+
+
 def sanitize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
 
@@ -639,25 +682,33 @@ def sanitize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     df.dropna(axis=1, how="all", inplace=True)
 
     for col in df.columns:
-        if df[col].dtype == "object":
-            df[col] = (
-                df[col]
-                .astype(str)
-                .str.replace(",", "", regex=False)
-                .str.replace("₹", "", regex=False)
-                .str.replace("%", "", regex=False)
-                .str.replace("—", "", regex=False)
-                .str.strip()
-            )
+        if not _is_text_dtype(df[col]):
+            continue
 
-            # Try numeric conversion
-            df[col] = pd.to_numeric(df[col], errors="ignore")
+        stripped = df[col].astype("string").str.strip().replace("", pd.NA)
+        present = stripped.notna().sum()
+        if present == 0:
+            continue
 
-            # Try datetime conversion
-            try:
-                df[col] = pd.to_datetime(df[col], errors="ignore")
-            except:
-                pass
+        # Numeric conversion: drop thousands separators, currency and percent signs
+        cleaned = (
+            stripped
+            .str.replace(",", "", regex=False)
+            .str.replace("₹", "", regex=False)
+            .str.replace("$", "", regex=False)
+            .str.replace("%", "", regex=False)
+            .str.replace("—", "", regex=False)
+            .str.strip()
+        )
+        numeric = pd.to_numeric(cleaned, errors="coerce")
+        if numeric.notna().sum() / present >= TYPE_CONVERSION_THRESHOLD:
+            df[col] = numeric.astype("float64")
+            continue
+
+        # Datetime conversion
+        parsed = _parse_datetime(stripped)
+        if parsed.notna().sum() / present >= TYPE_CONVERSION_THRESHOLD:
+            df[col] = parsed
 
     return df
 
@@ -678,25 +729,27 @@ def format_number(num: float) -> str:
 def detect_date_column(df: pd.DataFrame) -> Optional[str]:
     """Automatically detect date column in dataframe."""
     for col in df.columns:
-        if df[col].dtype == 'datetime64[ns]':
+        if pd.api.types.is_datetime64_any_dtype(df[col]):
             return col
-        if df[col].dtype == 'object':
-            try:
-                pd.to_datetime(df[col].head(100))
+    for col in df.columns:
+        if _is_text_dtype(df[col]):
+            sample = df[col].dropna().head(100)
+            if len(sample) and _parse_datetime(sample).notna().mean() >= TYPE_CONVERSION_THRESHOLD:
                 return col
-            except:
-                continue
     return None
 
 
 def detect_numeric_columns(df: pd.DataFrame) -> List[str]:
     """Detect numeric columns suitable for analysis."""
-    return df.select_dtypes(include=[np.number]).columns.tolist()
+    return [col for col in df.columns if _is_numeric_dtype(df[col])]
 
 
 def detect_categorical_columns(df: pd.DataFrame) -> List[str]:
     """Detect categorical columns."""
-    return df.select_dtypes(include=['object', 'category']).columns.tolist()
+    return [
+        col for col in df.columns
+        if _is_text_dtype(df[col]) or isinstance(df[col].dtype, pd.CategoricalDtype)
+    ]
 
 
 def calculate_data_quality_score(df: pd.DataFrame) -> Dict[str, Any]:
@@ -711,11 +764,11 @@ def calculate_data_quality_score(df: pd.DataFrame) -> Dict[str, Any]:
     # Check for consistent data types
     consistency = 100
     for col in df.columns:
-        if df[col].dtype == 'object':
+        if _is_text_dtype(df[col]):
             try:
                 pd.to_numeric(df[col], errors='raise')
                 consistency -= 5  # Penalty for numeric stored as string
-            except:
+            except Exception:
                 pass
     
     overall_score = (completeness * 0.4 + uniqueness * 0.3 + consistency * 0.3)
@@ -867,6 +920,79 @@ def generate_sample_data(rows: int = 2000) -> pd.DataFrame:
     return data.sort_values('date').reset_index(drop=True)
 
 
+# Largest number of rows read from an uploaded file (override with MAX_UPLOAD_ROWS)
+MAX_UPLOAD_ROWS = int(os.environ.get("MAX_UPLOAD_ROWS", 200_000))
+
+
+@st.cache_data(show_spinner=False, max_entries=16)
+def list_excel_sheets(content: bytes) -> List[str]:
+    return pd.ExcelFile(BytesIO(content)).sheet_names
+
+
+@st.cache_data(show_spinner="Loading file...", max_entries=16)
+def load_uploaded_file(content: bytes, file_name: str, sheet: Optional[str] = None) -> Dict[str, Any]:
+    """Read, sanitize and profile an uploaded CSV/Excel file, capped at MAX_UPLOAD_ROWS."""
+    buffer = BytesIO(content)
+    if file_name.lower().endswith(".csv"):
+        raw = pd.read_csv(buffer, nrows=MAX_UPLOAD_ROWS + 1)
+    else:
+        raw = pd.read_excel(buffer, sheet_name=sheet or 0, nrows=MAX_UPLOAD_ROWS + 1)
+
+    df = sanitize_dataframe(raw.head(MAX_UPLOAD_ROWS))
+    profiles = DatasetProfiler(df).profile()
+    semantic = SemanticClassifier(profiles).classify()
+    return {
+        "df": df,
+        "truncated": len(raw) > MAX_UPLOAD_ROWS,
+        "profiles": profiles,
+        "semantic": semantic,
+        "kpis": MetricIntelligenceEngine(df, semantic).discover_kpis(),
+    }
+
+
+# -----------------------------------------------------------------------------
+# Cached analysis. Streamlit reruns the whole script on every click, so the
+# expensive steps are cached per dataset. They take the DataFrame as `_df`
+# (not hashed) plus an exact content fingerprint: Streamlit's own DataFrame
+# hashing only samples rows of large frames and could miss a cleaning step.
+# -----------------------------------------------------------------------------
+ANALYSIS_CACHE = dict(show_spinner=False, max_entries=32, ttl=3600)
+
+
+def data_fingerprint(df: pd.DataFrame) -> str:
+    digest = hashlib.sha256(pd.util.hash_pandas_object(df, index=True).values.tobytes())
+    digest.update(repr((list(df.columns), [str(dtype) for dtype in df.dtypes])).encode())
+    return digest.hexdigest()
+
+
+@st.cache_data(**ANALYSIS_CACHE)
+def compute_quality(_df: pd.DataFrame, fingerprint: str) -> Dict[str, Any]:
+    return calculate_data_quality_score(_df)
+
+
+@st.cache_data(**ANALYSIS_CACHE)
+def compute_insights(_df: pd.DataFrame, fingerprint: str) -> Tuple[List[Dict], List[Dict]]:
+    return EnhancedInsightsEngine(_df).generate_all_insights()
+
+
+@st.cache_data(**ANALYSIS_CACHE)
+def compute_profile(_df: pd.DataFrame, fingerprint: str) -> Dict[str, Any]:
+    return DataPreprocessor(_df).profile_data()
+
+
+@st.cache_data(**ANALYSIS_CACHE)
+def dataframe_to_csv(_df: pd.DataFrame, fingerprint: str) -> str:
+    return _df.to_csv(index=False)
+
+
+@st.cache_data(**ANALYSIS_CACHE)
+def run_query(_df: pd.DataFrame, fingerprint: str, query: str, numeric_cols: List[str],
+              categorical_cols: List[str], date_col: Optional[str]) -> Dict[str, Any]:
+    engine = SmartQueryEngine(_df, numeric_cols=numeric_cols,
+                              categorical_cols=categorical_cols, date_col=date_col)
+    return engine.process_query(query)
+
+
 # =============================================================================
 # DATA PREPROCESSING CLASS
 # =============================================================================
@@ -897,7 +1023,7 @@ class DataPreprocessor:
                 'unique_pct': float(self.df[col].nunique() / len(self.df) * 100)
             }
             
-            if self.df[col].dtype in ['float64', 'int64']:
+            if _is_numeric_dtype(self.df[col]):
                 col_profile.update({
                     'mean': float(self.df[col].mean()),
                     'std': float(self.df[col].std()),
@@ -934,35 +1060,40 @@ class DataPreprocessor:
                 original_nulls = self.df[col].isnull().sum()
                 
                 if strategy == 'auto':
-                    if self.df[col].dtype in ['float64', 'int64']:
+                    if _is_numeric_dtype(self.df[col]):
                         if abs(self.df[col].skew()) > 1:
-                            self.df[col].fillna(self.df[col].median(), inplace=True)
+                            self.df[col] = self.df[col].fillna(self.df[col].median())
                             method = 'median'
                         else:
-                            self.df[col].fillna(self.df[col].mean(), inplace=True)
+                            self.df[col] = self.df[col].fillna(self.df[col].mean())
                             method = 'mean'
                     else:
                         mode_val = self.df[col].mode()
                         if len(mode_val) > 0:
-                            self.df[col].fillna(mode_val[0], inplace=True)
+                            self.df[col] = self.df[col].fillna(mode_val[0])
                             method = 'mode'
                         else:
-                            self.df[col].fillna('Unknown', inplace=True)
+                            self.df[col] = self.df[col].fillna('Unknown')
                             method = 'constant'
+                elif strategy in ('mean', 'median') and not _is_numeric_dtype(self.df[col]):
+                    continue  # mean/median only apply to numeric columns
                 elif strategy == 'mean':
-                    self.df[col].fillna(self.df[col].mean(), inplace=True)
+                    self.df[col] = self.df[col].fillna(self.df[col].mean())
                     method = 'mean'
                 elif strategy == 'median':
-                    self.df[col].fillna(self.df[col].median(), inplace=True)
+                    self.df[col] = self.df[col].fillna(self.df[col].median())
                     method = 'median'
                 elif strategy == 'mode':
-                    self.df[col].fillna(self.df[col].mode()[0], inplace=True)
+                    mode_val = self.df[col].mode()
+                    if len(mode_val) == 0:
+                        continue
+                    self.df[col] = self.df[col].fillna(mode_val[0])
                     method = 'mode'
                 elif strategy == 'drop':
                     self.df.dropna(subset=[col], inplace=True)
                     method = 'drop rows'
                 elif strategy == 'zero':
-                    self.df[col].fillna(0, inplace=True)
+                    self.df[col] = self.df[col].fillna(0)
                     method = 'zero'
                 else:
                     method = 'none'
@@ -977,18 +1108,24 @@ class DataPreprocessor:
         original_len = len(self.df)
         
         for col in cols:
-            if col not in self.df.columns or self.df[col].dtype not in ['float64', 'int64']:
+            if col not in self.df.columns or not _is_numeric_dtype(self.df[col]):
                 continue
                 
+            # Rows with missing values are kept; only measured outliers are dropped
+            values = self.df[col]
             if method == 'iqr':
-                Q1 = self.df[col].quantile(0.25)
-                Q3 = self.df[col].quantile(0.75)
+                Q1 = values.quantile(0.25)
+                Q3 = values.quantile(0.75)
                 IQR = Q3 - Q1
-                self.df = self.df[(self.df[col] >= Q1 - threshold * IQR) & 
-                                  (self.df[col] <= Q3 + threshold * IQR)]
+                keep = values.between(Q1 - threshold * IQR, Q3 + threshold * IQR)
             elif method == 'zscore':
-                z_scores = np.abs(stats.zscore(self.df[col].dropna()))
-                self.df = self.df.iloc[z_scores < threshold]
+                std = values.std()
+                if not std or pd.isna(std):
+                    continue
+                keep = ((values - values.mean()) / std).abs() < threshold
+            else:
+                continue
+            self.df = self.df[keep | values.isna()]
         
         removed = original_len - len(self.df)
         if removed > 0:
@@ -1086,7 +1223,7 @@ class NarrativeEngine:
                     
                     if abs(top_change_val) > 15:
                         causes.append(f"{'strong performance' if top_change_val > 0 else 'underperformance'} in {cat_col} '{top_change}'")
-            except:
+            except Exception:
                 continue
         
         return ", ".join(causes[:2]) if causes else ""
@@ -1218,7 +1355,7 @@ class EnhancedInsightsEngine:
                             'type': 'trend',
                             'icon': '📈' if change_pct > 0 else '📉',
                             'title': f'{col.replace("_", " ").title()} {"Increased" if change_pct > 0 else "Decreased"} by {abs(change_pct):.1f}%',
-                            'description': f'Comparing recent 20% of data vs earliest 20%',
+                            'description': 'Comparing recent 20% of data vs earliest 20%',
                             'narrative': narrative,
                             'priority': 'high' if abs(change_pct) > 20 else 'medium',
                             'metric': col,
@@ -1238,13 +1375,13 @@ class EnhancedInsightsEngine:
                                 'type': 'trend_weekly',
                                 'icon': '📅',
                                 'title': f'Week-over-Week: {col.replace("_", " ").title()} {"Up" if wow_change > 0 else "Down"} {abs(wow_change):.1f}%',
-                                'description': f'Comparing last 7 days vs previous 7 days',
+                                'description': 'Comparing last 7 days vs previous 7 days',
                                 'narrative': f'Short-term momentum shows {col.replace("_", " ")} {"accelerating" if wow_change > 0 else "decelerating"} with a {abs(wow_change):.1f}% {"gain" if wow_change > 0 else "decline"} week-over-week.',
                                 'priority': 'medium',
                                 'metric': col,
                                 'value': wow_change
                             })
-            except Exception as e:
+            except Exception:
                 continue
     
     def _analyze_correlations(self):
@@ -1272,7 +1409,7 @@ class EnhancedInsightsEngine:
                             'metric': f'{col1}_vs_{col2}',
                             'value': corr_val
                         })
-        except:
+        except Exception:
             pass
     
     def _detect_anomalies(self):
@@ -1302,7 +1439,7 @@ class EnhancedInsightsEngine:
                         'metric': col,
                         'value': anomaly_pct
                     })
-            except:
+            except Exception:
                 continue
     
     def _analyze_categorical_performance(self):
@@ -1340,7 +1477,7 @@ class EnhancedInsightsEngine:
                                     'metric': f'{cat_col}_{num_col}',
                                     'value': gap_pct
                                 })
-                except:
+                except Exception:
                     continue
     
     def _analyze_distributions(self):
@@ -1348,7 +1485,6 @@ class EnhancedInsightsEngine:
         for col in self.numeric_cols[:3]:
             try:
                 skewness = self.df[col].skew()
-                kurtosis = self.df[col].kurtosis()
                 
                 if abs(skewness) > 1.5:
                     direction = "right (positive)" if skewness > 0 else "left (negative)"
@@ -1363,7 +1499,7 @@ class EnhancedInsightsEngine:
                         'metric': col,
                         'value': skewness
                     })
-            except:
+            except Exception:
                 continue
     
     def _perform_statistical_tests(self):
@@ -1399,7 +1535,7 @@ class EnhancedInsightsEngine:
                                     'metric': f'{cat_col}_{num_col}_ttest',
                                     'value': p_value
                                 })
-                except:
+                except Exception:
                     continue
     
     def _detect_seasonality(self):
@@ -1430,7 +1566,7 @@ class EnhancedInsightsEngine:
                                 'metric': col,
                                 'value': autocorr_7
                             })
-            except:
+            except Exception:
                 continue
     
     def _generate_recommendations(self):
@@ -1452,7 +1588,7 @@ class EnhancedInsightsEngine:
                 self.recommendations.append({
                     'icon': '📊',
                     'title': 'Leverage Correlation for Prediction',
-                    'description': f"The strong correlation identified can be used to build predictive models. When one variable changes, you can anticipate changes in the correlated variable.",
+                    'description': "The strong correlation identified can be used to build predictive models. When one variable changes, you can anticipate changes in the correlated variable.",
                     'action': 'Develop regression model for forecasting',
                     'priority': 'medium'
                 })
@@ -1843,7 +1979,7 @@ class SmartQueryEngine:
         )
         
         result['figure'] = fig
-        result['text'] = f"## 🔗 Correlation Analysis"
+        result['text'] = "## 🔗 Correlation Analysis"
         
         strength = "very strong" if abs(correlation) > 0.8 else "strong" if abs(correlation) > 0.6 else "moderate" if abs(correlation) > 0.4 else "weak"
         direction = "positive" if correlation > 0 else "negative"
@@ -2036,7 +2172,7 @@ class SmartQueryEngine:
         result['follow_up_suggestions'] = suggestions
         
         # Provide schema context
-        result['narrative'] += f"\n\n**Available columns:**\n"
+        result['narrative'] += "\n\n**Available columns:**\n"
         result['narrative'] += f"- Numeric: {', '.join(self.numeric_cols[:5])}\n"
         result['narrative'] += f"- Categorical: {', '.join(self.categorical_cols[:5])}\n"
         
@@ -2373,6 +2509,11 @@ class VisualizationBuilder:
 # REPORT GENERATOR - Export to PDF/PowerPoint
 # =============================================================================
 
+def _markdown_bold_to_html(text: str) -> str:
+    """Render **bold** markdown in already-escaped report text."""
+    return re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", text)
+
+
 class ReportGenerator:
     """Generate exportable reports in multiple formats."""
     
@@ -2515,11 +2656,11 @@ class ReportGenerator:
 """
         
         for insight in self.insights[:10]:
-            priority_class = f"insight-{insight.get('priority', 'medium')}"
+            priority_class = f"insight-{safe_html(insight.get('priority', 'medium'))}"
             html += f"""
         <div class="insight {priority_class}">
-            <h3>{insight['icon']} {insight['title']}</h3>
-            <p>{insight.get('narrative', insight['description'])}</p>
+            <h3>{safe_html(insight['icon'])} {safe_html(insight['title'])}</h3>
+            <p>{_markdown_bold_to_html(safe_html(insight.get('narrative', insight['description'])))}</p>
         </div>
 """
         
@@ -2528,9 +2669,9 @@ class ReportGenerator:
         for rec in self.recommendations[:5]:
             html += f"""
         <div class="recommendation">
-            <h3>{rec['icon']} {rec['title']}</h3>
-            <p>{rec['description']}</p>
-            <div class="action">→ {rec['action']}</div>
+            <h3>{safe_html(rec['icon'])} {safe_html(rec['title'])}</h3>
+            <p>{safe_html(rec['description'])}</p>
+            <div class="action">→ {safe_html(rec['action'])}</div>
         </div>
 """
         
@@ -2618,7 +2759,7 @@ def render_suggested_queries(df: pd.DataFrame):
     cols = st.columns(4)
     for i, suggestion in enumerate(suggestions):
         with cols[i % 4]:
-            st.markdown(f"<span class='suggested-query'>{suggestion}</span>", unsafe_allow_html=True)
+            st.markdown(f"<span class='suggested-query'>{safe_html(suggestion)}</span>", unsafe_allow_html=True)
 
 
 # =============================================================================
@@ -2648,6 +2789,7 @@ def main():
         )
         
         df = None
+        dataset_key = "sample:2000"
         
         if data_source == "Upload File":
             uploaded_files = st.file_uploader(
@@ -2665,36 +2807,29 @@ def main():
                         # ==============================
                         # LOAD FILE
                         # ==============================
-                        if file.name.lower().endswith(".csv"):
-                            temp_df = pd.read_csv(file)
-
-                        else:
-                            excel_file = pd.ExcelFile(file)
-
-                            if len(excel_file.sheet_names) > 1:
+                        content = file.getvalue()
+                        sheet = None
+                        if not file.name.lower().endswith(".csv"):
+                            sheet_names = list_excel_sheets(content)
+                            if len(sheet_names) > 1:
                                 sheet = st.selectbox(
                                     f"Select sheet from {file.name}",
-                                    excel_file.sheet_names,
+                                    sheet_names,
                                     key=f"sheet_{file.name}"
                                 )
-                                temp_df = pd.read_excel(file, sheet_name=sheet)
-                            else:
-                                temp_df = pd.read_excel(file)
 
-                        # ==============================
-                        # SANITIZE DATAFRAME
-                        # ==============================
-                        temp_df = sanitize_dataframe(temp_df)
+                        # Read, sanitize and profile once per file (cached across reruns)
+                        loaded = load_uploaded_file(content, file.name, sheet)
+                        temp_df = loaded["df"]
+                        profiles = loaded["profiles"]
+                        semantic = loaded["semantic"]
+                        kpis = loaded["kpis"]
 
-                        # ==============================
-                        # SEMANTIC ENGINE (CORE BI)
-                        # ==============================
-                        profiler = DatasetProfiler(temp_df)
-                        profiles = profiler.profile()
-
-                        semantic = SemanticClassifier(profiles).classify()
-
-                        kpis = MetricIntelligenceEngine(temp_df, semantic).discover_kpis()
+                        if loaded["truncated"]:
+                            st.warning(
+                                f"⚠️ {file.name} has more than {MAX_UPLOAD_ROWS:,} rows; "
+                                f"only the first {MAX_UPLOAD_ROWS:,} were loaded."
+                            )
 
                         # ==============================
                         # STORE DATASET
@@ -2753,20 +2888,29 @@ def main():
             
             if st.session_state.active_dataset:
                 df = st.session_state.datasets[st.session_state.active_dataset]
+                dataset_key = f"upload:{st.session_state.active_dataset}"
         else:
             sample_size = st.slider("Sample size", 500, 5000, 2000, 500)
             df = generate_sample_data(sample_size)
+            dataset_key = f"sample:{sample_size}"
         
         if df is None:
             df = generate_sample_data(2000)
+            dataset_key = "sample:2000"
+
+        # Use the cleaned version from the Data Tools tab when one exists
+        if dataset_key in st.session_state.processed_data:
+            df = st.session_state.processed_data[dataset_key]
+            steps = len(st.session_state.processing_log.get(dataset_key, []))
+            st.caption(f"🔧 Using cleaned data ({steps} step{'s' if steps != 1 else ''} applied in Data Tools)")
         
-        # Parse date columns
+        # Parse text date columns (numeric columns like "delivery_time" are left alone)
+        df = df.copy()
         for col in df.columns:
-            if 'date' in col.lower() or 'time' in col.lower():
-                try:
-                    df[col] = pd.to_datetime(df[col])
-                except:
-                    pass
+            if ('date' in col.lower() or 'time' in col.lower()) and _is_text_dtype(df[col]):
+                parsed = _parse_datetime(df[col])
+                if parsed.notna().sum() >= TYPE_CONVERSION_THRESHOLD * df[col].notna().sum():
+                    df[col] = parsed
 
         st.markdown("---")
         st.markdown("### 🧠 Semantic Catalog")
@@ -2795,13 +2939,23 @@ def main():
                             st.write(f"• {issue}")
                     else:
                         st.success("✅ Semantic catalog applied successfully.")
-                except json.JSONDecodeError:
+                except (json.JSONDecodeError, UnicodeDecodeError):
                     st.error("❌ Invalid JSON. Please check the catalog format.")
+                except ValueError as e:
+                    st.error(f"❌ Invalid semantic catalog: {e}")
 
         st.markdown("---")
         
+        # Resolve the schema first: it may convert the date column, after
+        # which the data is final for this run and can be fingerprinted
+        semantic_schema = resolve_semantic_schema(df)
+        date_col = semantic_schema["date_col"]
+        if date_col and not pd.api.types.is_datetime64_any_dtype(df[date_col]):
+            df[date_col] = _parse_datetime(df[date_col])
+        fingerprint = data_fingerprint(df)
+
         # Data Quality Score
-        quality = calculate_data_quality_score(df)
+        quality = compute_quality(df, fingerprint)
         quality_class = 'excellent' if quality['overall'] >= 90 else 'good' if quality['overall'] >= 70 else 'poor'
         
         st.markdown(f"""
@@ -2820,8 +2974,6 @@ def main():
         st.markdown("---")
         
         # Quick Stats
-        semantic_schema = resolve_semantic_schema(df)
-        date_col = semantic_schema["date_col"]
         numeric_cols = semantic_schema["numeric_cols"]
         categorical_cols = semantic_schema["categorical_cols"]
         metric_definitions = semantic_schema["metric_definitions"]
@@ -2897,19 +3049,18 @@ def main():
         else:
             cols = st.columns(min(len(metrics), 4))
 
-        
-        for col, metric in zip(cols, metrics):
-            with col:
-                delta_class = "metric-delta-positive" if metric['delta'] >= 0 else "metric-delta-negative"
-                delta_symbol = "↑" if metric['delta'] >= 0 else "↓"
-                
-                st.markdown(f"""
-                <div class="metric-card">
-                    <div class="metric-value">{metric['value']:,.0f}</div>
-                    <div class="metric-label">{metric['label']}</div>
-                    <div class="{delta_class}">{delta_symbol} {abs(metric['delta']):.1f}%</div>
-                </div>
-                """, unsafe_allow_html=True)
+            for col, metric in zip(cols, metrics):
+                with col:
+                    delta_class = "metric-delta-positive" if metric['delta'] >= 0 else "metric-delta-negative"
+                    delta_symbol = "↑" if metric['delta'] >= 0 else "↓"
+
+                    st.markdown(f"""
+                    <div class="metric-card">
+                        <div class="metric-value">{metric['value']:,.0f}</div>
+                        <div class="metric-label">{safe_html(metric['label'])}</div>
+                        <div class="{delta_class}">{delta_symbol} {abs(metric['delta']):.1f}%</div>
+                    </div>
+                    """, unsafe_allow_html=True)
         
         st.markdown("<br>", unsafe_allow_html=True)
         
@@ -2989,13 +3140,9 @@ def main():
         st.markdown("### 🔍 AI-Powered Insights with Business Narratives")
         
         with st.spinner("🤖 Analyzing your data..."):
-            insights_engine = EnhancedInsightsEngine(df)
-            insights, recommendations = insights_engine.generate_all_insights()
+            insights, recommendations = compute_insights(df, fingerprint)
         
         # Executive Summary
-        narrative_engine = NarrativeEngine(df)
-        exec_summary = narrative_engine.generate_executive_summary(insights)
-        
         st.markdown(f"""
         <div class="narrative-card">
             <h4>📋 Executive Summary</h4>
@@ -3015,10 +3162,10 @@ def main():
                 for insight in high_priority:
                     st.markdown(f"""
                     <div class="insight-card high-priority animate-slide-in">
-                        <span class="insight-icon">{insight['icon']}</span>
-                        <span class="insight-title">{insight['title']}</span>
-                        <div class="insight-description">{insight['description']}</div>
-                        <div class="insight-narrative">{insight.get('narrative', '')}</div>
+                        <span class="insight-icon">{safe_html(insight['icon'])}</span>
+                        <span class="insight-title">{safe_html(insight['title'])}</span>
+                        <div class="insight-description">{safe_html(insight['description'])}</div>
+                        <div class="insight-narrative">{safe_html(insight.get('narrative', ''))}</div>
                     </div>
                     """, unsafe_allow_html=True)
             
@@ -3027,9 +3174,9 @@ def main():
                     for insight in medium_priority:
                         st.markdown(f"""
                         <div class="insight-card medium-priority">
-                            <span class="insight-icon">{insight['icon']}</span>
-                            <span class="insight-title">{insight['title']}</span>
-                            <div class="insight-description">{insight['description']}</div>
+                            <span class="insight-icon">{safe_html(insight['icon'])}</span>
+                            <span class="insight-title">{safe_html(insight['title'])}</span>
+                            <div class="insight-description">{safe_html(insight['description'])}</div>
                         </div>
                         """, unsafe_allow_html=True)
         
@@ -3038,9 +3185,9 @@ def main():
             for rec in recommendations[:5]:
                 st.markdown(f"""
                 <div class="recommendation-card animate-fade-in">
-                    <div class="recommendation-title">{rec['icon']} {rec['title']}</div>
-                    <div class="recommendation-description">{rec['description']}</div>
-                    <div class="recommendation-action">→ {rec['action']}</div>
+                    <div class="recommendation-title">{safe_html(rec['icon'])} {safe_html(rec['title'])}</div>
+                    <div class="recommendation-description">{safe_html(rec['description'])}</div>
+                    <div class="recommendation-action">→ {safe_html(rec['action'])}</div>
                 </div>
                 """, unsafe_allow_html=True)
     
@@ -3125,13 +3272,7 @@ def main():
         
         if query:
             with st.spinner("🔍 Processing..."):
-                query_engine = SmartQueryEngine(
-                    df,
-                    numeric_cols=numeric_cols,
-                    categorical_cols=categorical_cols,
-                    date_col=date_col
-                )
-                result = query_engine.process_query(query)
+                result = run_query(df, fingerprint, query, numeric_cols, categorical_cols, date_col)
                 
                 st.markdown(result['text'])
                 
@@ -3139,12 +3280,12 @@ def main():
                     st.markdown(f"""
                     <div class="narrative-card">
                         <h4>💡 Analysis</h4>
-                        <p>{result['narrative']}</p>
+                        <p>{safe_html(result['narrative'])}</p>
                     </div>
                     """, unsafe_allow_html=True)
                 
                 if result.get('figure'):
-                    st.plotly_chart(result['figure'], use_container_width=True)
+                    st.plotly_chart(result['figure'], use_container_width=True, key="ask_chart")
                 
                 if isinstance(result.get('data'), pd.DataFrame) and len(result['data']) > 0:
                     st.dataframe(result['data'], use_container_width=True, hide_index=True)
@@ -3182,7 +3323,31 @@ def main():
         st.markdown("### 🔧 Data Preprocessing & Cleaning")
         
         preprocessor = DataPreprocessor(df)
-        profile = preprocessor.profile_data()
+        profile = compute_profile(df, fingerprint)
+
+        def apply_preprocessing(message: str) -> None:
+            """Keep the cleaned data for this dataset so every tab uses it."""
+            st.session_state.processed_data[dataset_key] = preprocessor.get_transformed_data()
+            st.session_state.processing_log.setdefault(dataset_key, []).extend(
+                preprocessor.get_transformation_log() or [message]
+            )
+            st.session_state.processing_notice = message
+            st.rerun()
+
+        notice = st.session_state.pop('processing_notice', None)
+        if notice:
+            st.success(f"✅ {notice}")
+
+        applied_steps = st.session_state.processing_log.get(dataset_key, [])
+        if applied_steps:
+            with st.expander(f"🧾 Applied cleaning steps ({len(applied_steps)})"):
+                for step in applied_steps:
+                    st.write(f"• {step}")
+                if st.button("↩️ Reset to original data", key="reset_preprocessing"):
+                    st.session_state.processed_data.pop(dataset_key, None)
+                    st.session_state.processing_log.pop(dataset_key, None)
+                    st.session_state.processing_notice = "Restored the original data"
+                    st.rerun()
         
         col1, col2 = st.columns(2)
         
@@ -3227,21 +3392,23 @@ def main():
                             "Fill with Zero": "zero"
                         }
                         preprocessor.handle_missing_values(strategy_map[missing_strategy])
-                        st.success(f"✅ Applied: {', '.join(preprocessor.get_transformation_log())}")
+                        apply_preprocessing(f"Missing values handled ({missing_strategy})")
             
             with st.expander("Remove Outliers"):
                 outlier_method = st.selectbox("Method", ["IQR", "Z-Score"])
                 outlier_threshold = st.slider("Threshold", 1.0, 3.0, 1.5, 0.1)
                 
                 if st.button("Remove Outliers"):
-                    preprocessor.remove_outliers(method=outlier_method.lower(), threshold=outlier_threshold)
-                    st.success(f"✅ {', '.join(preprocessor.get_transformation_log())}")
+                    method = {"IQR": "iqr", "Z-Score": "zscore"}[outlier_method]
+                    preprocessor.remove_outliers(method=method, threshold=outlier_threshold)
+                    apply_preprocessing(f"Outlier removal ({outlier_method}, threshold {outlier_threshold}): "
+                                        f"{len(df) - len(preprocessor.get_transformed_data()):,} rows removed")
             
             with st.expander("Create Date Features"):
                 if date_col:
                     if st.button("Generate Date Features"):
                         preprocessor.create_date_features()
-                        st.success("✅ Created year, month, day_of_week, quarter, etc.")
+                        apply_preprocessing("Created year, month, day_of_week, quarter, etc.")
                 else:
                     st.info("No date column detected")
         
@@ -3255,10 +3422,7 @@ def main():
     with tab6:
         st.markdown("### 📄 Export Reports")
         
-        # Generate insights if not already done
-        if 'insights' not in dir() or not insights:
-            insights_engine = EnhancedInsightsEngine(df)
-            insights, recommendations = insights_engine.generate_all_insights()
+        insights, recommendations = compute_insights(df, fingerprint)
         
         report_gen = ReportGenerator(df, insights, recommendations)
         
@@ -3306,7 +3470,7 @@ def main():
         with col1:
             st.download_button(
                 "📥 Download Full Dataset (CSV)",
-                df.to_csv(index=False),
+                dataframe_to_csv(df, fingerprint),
                 "data_export.csv",
                 "text/csv",
                 use_container_width=True
@@ -3349,17 +3513,17 @@ def main():
                         st.markdown(f"""
                         <div class="narrative-card">
                             <h4>💡 Business Insight</h4>
-                            <p>{card['summary']}</p>
+                            <p>{safe_html(card['summary'])}</p>
                         </div>
                         """, unsafe_allow_html=True)
                     if card.get("figure") is not None:
-                        st.plotly_chart(card["figure"], use_container_width=True)
+                        st.plotly_chart(card["figure"], use_container_width=True, key=f"dash_chart_{idx}")
                     if isinstance(card.get("data"), pd.DataFrame) and len(card["data"]) > 0:
                         st.dataframe(card["data"], use_container_width=True, hide_index=True)
 
                     if st.button("Remove card", key=f"remove_card_{idx}"):
                         st.session_state.saved_dashboards.pop(idx)
-                        st.experimental_rerun()
+                        st.rerun()
     
     # Footer
     st.markdown("""

@@ -8,7 +8,8 @@ font = "sans serif"
 [server]
 headless = true
 port = 8501
-enableCORS = false
+# Largest accepted upload, in MB (Streamlit's default is 200)
+maxUploadSize = 50
 
 [browser]
 gatherUsageStats = false
