@@ -1,413 +1,176 @@
-# 🚀 AI Analytics Dashboard
+# AI Analytics Dashboard
 
-**An Open-Source Alternative to Tableau AI**
+**Upload a CSV or Excel file and get automated insights, anomaly detection, Prophet forecasts and plain-English answers to your questions, in one self-hosted Streamlit app.**
 
-A comprehensive analytics platform featuring automated insights, predictive analytics, and natural language queries—powered by Prophet, Plotly, and Streamlit.
+[![CI](https://github.com/Akshatb848/AI-Analytics-Dashboard/actions/workflows/ci.yml/badge.svg)](https://github.com/Akshatb848/AI-Analytics-Dashboard/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-blue)
+![Streamlit 1.64](https://img.shields.io/badge/Streamlit-1.64-red)
 
-![Python](https://img.shields.io/badge/Python-3.11+-blue)
-![Streamlit](https://img.shields.io/badge/Streamlit-1.64-red)
-![License](https://img.shields.io/badge/License-MIT-green)
+![Overview tab running on the bundled sample data: KPI cards, filters, time series, category breakdown, distribution and correlation matrix](docs/screenshots/overview.jpg)
 
----
+<sub>Screenshot of the app running locally on its built-in synthetic sample dataset (2,000 rows). Numbers shown are from that generated data, not from a real business.</sub>
 
-## ✨ Features
+<details>
+<summary><b>More screenshots</b> (Insights, Predictions, Ask Data)</summary>
 
-### 📊 **Automated Data Insights**
-- Statistical analysis with anomaly detection
-- Trend identification and pattern recognition
-- Correlation discovery between variables
-- Distribution analysis with skewness detection
-- Priority-based insight categorization
+| Automated insights | Prophet forecast with backtest |
+|---|---|
+| ![Insights tab](docs/screenshots/insights.jpg) | ![Predictions tab](docs/screenshots/predictions.jpg) |
 
-### 📈 **Predictive Analytics**
-- Time series forecasting using Facebook Prophet
-- Configurable seasonality (yearly, weekly, daily)
-- Confidence interval visualization
-- Trend and component decomposition
-- Exportable forecast data
+**Ask Data:** "Total sales by region and channel", answered by the built-in parser (no API key)
 
-### 💬 **Natural Language Queries**
-- Ask questions in plain English, answered with a chart, table and short explanation
-- Totals, averages, counts, top/bottom N, one or two groupings ("sales by region and channel")
-- Filters by category value, number or year ("average profit in North where discount >= 0.2 in 2025")
-- Trends by day, week, month, quarter or year, correlations, distributions and outliers
-- Optional **GLM-4.5-Flash** (Z.ai, free tier) to interpret free-form questions — see below
+![Ask Data tab](docs/screenshots/ask_data.jpg)
 
-### 🧠 **Semantic Catalog (Governed Metrics)**
-- Upload a JSON semantic catalog to define metrics, dimensions, and time grains
-- Standardize KPIs across dashboards with consistent definitions
-- Validation feedback for missing columns and mappings
-
-### 🗂️ **Executive Dashboard Studio**
-- Save AI insights and charts as reusable dashboard cards
-- Curate stakeholder-ready summaries from natural language analysis
-- Manage and remove cards directly within the app
-
-### 📋 **Data Explorer**
-- Interactive data preview
-- Column statistics and summaries
-- Export capabilities (CSV, JSON)
-- Automatic data type detection
+</details>
 
 ---
 
-## 🛠️ Tech Stack
+## Key features
 
-| Component | Technology |
-|-----------|------------|
-| Frontend | Streamlit |
-| Visualization | Plotly |
+- **Automated insights.** Trend, correlation, IQR-based anomaly, distribution, category-performance, seasonality and statistical-test checks, each written up as a short business narrative with recommendations.
+- **Forecasting.** Prophet forecasts for any numeric column with configurable horizon and seasonality, a 95% interval, component plots, and a hold-out **backtest** that reports MAPE, interval coverage and a comparison against a naive baseline, so you can tell when a forecast is not worth trusting.
+- **Ask Data (natural-language queries).** Totals, averages, counts, top/bottom N, one or two groupings, filters by category/number/year, trends by day to year, correlations, distributions and outliers, each answered with a chart, a table and an explanation. A rule-based parser works offline; optionally **GLM-4.5-Flash** (Z.ai) turns freer phrasing into a validated query plan.
+- **Semantic catalog.** Load a JSON catalog of governed metrics, dimensions and time grains so KPIs mean the same thing everywhere, with validation against your columns.
+- **Data Tools.** Missing-value handling, outlier treatment and date-feature extraction, plus a data-quality score.
+- **Dashboards and reports.** Save answers as dashboard cards, export/import them as JSON, and download Markdown, HTML or CSV reports.
+- **Optional sign-in.** Streamlit's built-in OpenID Connect (Google, Entra ID, Auth0, Okta, ...) with email or domain allow-lists.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    U[User] -->|CSV / Excel upload<br/>or sample data| APP[app.py<br/>Streamlit UI, session state, caching]
+    APP --> DU[data_utils / preprocessing<br/>type detection, cleaning, quality score]
+    APP --> SEM[semantic_engine<br/>column profiles, governed metrics]
+    APP --> INS[insights<br/>trends, anomalies, correlations, narratives]
+    APP --> FC[forecasting<br/>Prophet + backtest]
+    APP --> QE[query_parser + query_engine<br/>question → plan → pandas]
+    QE -. optional .-> LLM[llm.py<br/>GLM-4.5-Flash plans only,<br/>schema sent, never rows]
+    APP --> VIZ[visualization<br/>Plotly charts]
+    APP --> OUT[reports / dashboards<br/>Markdown, HTML, CSV, JSON cards]
+    APP --> AUTH[ui/auth<br/>optional OIDC sign-in]
+```
+
+When GLM is enabled, the model only proposes a query plan (columns, filters, grouping, aggregation). The app validates that plan against your schema and executes it with pandas; the model never runs code. Z.ai receives the question, column names and types, up to 15 values per category column and the date range, never the data rows. If the key is missing, the API fails, or the reply can't be used, the built-in parser answers and the app says so.
+
+## Tech stack
+
+| Area | Tools |
+|---|---|
+| App / UI | Streamlit 1.64 |
+| Data | pandas, NumPy, openpyxl |
+| Statistics | SciPy, statsmodels |
 | Forecasting | Prophet |
-| Data Processing | Pandas, NumPy |
-| Statistics | SciPy |
+| Charts | Plotly |
+| Optional LLM | GLM-4.5-Flash via Z.ai HTTP API (`requests`) |
+| Auth (optional) | Streamlit OIDC (Authlib) |
+| Quality | pytest (Streamlit `AppTest`), Ruff, GitHub Actions, Docker health check |
 
----
+## Quick start
 
-## 🚀 Quick Start
-
-### Local Development
+### Local
 
 ```bash
-# Clone the repository
-git clone https://github.com/yourusername/ai-analytics-dashboard.git
-cd ai-analytics-dashboard
-
-# Create virtual environment
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Run the app
+git clone https://github.com/Akshatb848/AI-Analytics-Dashboard.git
+cd AI-Analytics-Dashboard
+python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -r requirements.txt                      # pinned; needs Python 3.11+
 streamlit run app.py
 ```
 
-Dependencies in `requirements.txt` are pinned to the versions the app is tested against, which require Python 3.11 or newer.
+Open http://localhost:8501. The app starts on a generated sample dataset; switch to **Upload File** in the sidebar for your own CSV/XLSX (50 MB limit via `.streamlit/config.toml`).
 
-### Running Tests
-
-```bash
-pip install -r requirements-dev.txt
-pytest
-```
-
-The suite in `tests/` runs the app headlessly with Streamlit's `AppTest` (sample data, Ask Data queries, forecasting, Data Tools, Dashboards) and unit-tests the data cleaning helpers.
-
-### Using Google Colab
-
-```python
-# Install dependencies
-!pip install streamlit pandas numpy plotly prophet scipy pyngrok
-
-# Write the app file
-%%writefile app.py
-# ... (paste the full app.py content)
-
-# Run with ngrok tunnel
-from pyngrok import ngrok
-!streamlit run app.py &>/dev/null &
-public_url = ngrok.connect(8501)
-print(f"Access your app at: {public_url}")
-```
-
----
-
-## ☁️ Deployment Options
-
-### Docker (any host)
+### Docker
 
 ```bash
 docker build -t ai-analytics-dashboard .
-docker run -d -p 8501:8501 \
-  -e ZAI_API_KEY="your-key" \
-  ai-analytics-dashboard
+docker run -d -p 8501:8501 --env-file .env ai-analytics-dashboard
 ```
 
-The app is served on port 8501 and runs as a non-root user. The image has a health check on
-Streamlit's `/_stcore/health` endpoint (`docker inspect -f '{{.State.Health.Status}}' <container>`),
-which load balancers and orchestrators can also poll. `ZAI_API_KEY` is optional; secrets files are
-excluded from the image by `.dockerignore`, so pass keys at runtime.
+The image runs as a non-root user and has a health check on Streamlit's `/_stcore/health` endpoint. Secrets are excluded by `.dockerignore`; pass them at runtime. A `Procfile` is included for Heroku/Railway-style hosts, and the app also deploys as-is to Streamlit Community Cloud (main file `app.py`).
 
-### Option 1: Streamlit Cloud (Recommended - Free)
+## Configuration
 
-1. **Push to GitHub:**
-   ```bash
-   git init
-   git add .
-   git commit -m "Initial commit"
-   git remote add origin https://github.com/yourusername/ai-analytics-dashboard.git
-   git push -u origin main
-   ```
+Copy `.env.example` to `.env`. Every variable is optional.
 
-2. **Deploy on Streamlit Cloud:**
-   - Go to [share.streamlit.io](https://share.streamlit.io)
-   - Click "New app"
-   - Connect your GitHub repository
-   - Select `app.py` as the main file
-   - Click "Deploy"
-
-3. **Your app will be live at:**
-   ```
-   https://yourusername-ai-analytics-dashboard.streamlit.app
-   ```
-
-### Option 2: Railway (Free Tier Available)
-
-1. **Create `Procfile`:**
-   ```
-   web: streamlit run app.py --server.port=$PORT --server.address=0.0.0.0
-   ```
-
-2. **Create `railway.json`:**
-   ```json
-   {
-     "$schema": "https://railway.app/railway.schema.json",
-     "build": {
-       "builder": "NIXPACKS"
-     },
-     "deploy": {
-       "startCommand": "streamlit run app.py --server.port=$PORT --server.address=0.0.0.0"
-     }
-   }
-   ```
-
-3. **Deploy:**
-   - Go to [railway.app](https://railway.app)
-   - Connect GitHub repository
-   - Railway auto-detects and deploys
-
-### Option 3: Render (Free Tier)
-
-1. **Create `render.yaml`:**
-   ```yaml
-   services:
-     - type: web
-       name: ai-analytics-dashboard
-       env: python
-       buildCommand: pip install -r requirements.txt
-       startCommand: streamlit run app.py --server.port=$PORT --server.address=0.0.0.0
-   ```
-
-2. **Deploy:**
-   - Go to [render.com](https://render.com)
-   - Create new Web Service
-   - Connect repository
-
-### Option 4: Hugging Face Spaces (Free)
-
-1. **Create `README.md` for HF:**
-   ```yaml
-   ---
-   title: AI Analytics Dashboard
-   emoji: 📊
-   colorFrom: indigo
-   colorTo: green
-   sdk: streamlit
-   sdk_version: 1.64.0
-   app_file: app.py
-   pinned: false
-   ---
-   ```
-
-2. **Deploy:**
-   - Go to [huggingface.co/spaces](https://huggingface.co/spaces)
-   - Create new Space with Streamlit SDK
-   - Upload files or connect GitHub
-
----
-
-## 📁 Project Structure
-
-```
-ai-analytics-dashboard/
-├── app.py                 # Streamlit page: layout, session state, caching
-├── analytics/
-│   ├── data_utils.py      # Type detection, cleaning, quality score, sample data
-│   ├── preprocessing.py   # Data Tools operations (missing values, outliers, date features)
-│   ├── insights.py        # Automated insights and narratives
-│   ├── query_engine.py    # Ask Data question answering
-│   ├── forecasting.py     # Prophet forecasts
-│   ├── visualization.py   # Overview charts
-│   ├── reports.py         # Markdown / HTML / CSV reports
-│   └── formatting.py      # HTML escaping and number formatting
-├── ui/
-│   ├── styles.py          # Custom CSS
-│   └── components.py      # Tutorial and small UI helpers
-├── semantic_engine.py     # Column profiling and semantic catalog
-├── requirements.txt       # Python dependencies (pinned)
-├── requirements-dev.txt   # Test dependencies
-├── tests/                 # Smoke and unit tests
-├── .streamlit/
-│   └── config.toml       # Streamlit configuration
-├── README.md             # Documentation
-├── Dockerfile            # Production image with health check
-├── Procfile              # For Railway/Heroku
-└── .gitignore            # Git ignore file
-```
-
----
-
-## 🎯 Usage Guide
-
-### Uploading Data
-
-1. Click "Upload CSV" in the sidebar
-2. Select your CSV file
-3. The app automatically detects:
-   - Date columns for time series
-   - Numeric columns for analysis
-   - Categorical columns for grouping
-
-### Supported Data Formats
-
-| Column Type | Detection Method | Use Case |
-|-------------|-----------------|----------|
-| Date | Auto-parse datetime | Time series, trends |
-| Numeric | Float/Int types | Metrics, aggregations |
-| Categorical | String/Object types | Grouping, filtering |
-
-### Natural Language Query Examples
-
-```
-# Aggregations
-"Total sales by region"
-"Average profit by category"
-"Maximum quantity by month"
-
-# Time Series
-"Trend of sales over time"
-"Show revenue growth"
-
-# Comparisons
-"Compare sales and profit"
-"Correlation between price and quantity"
-
-# Filtering
-"Sales where region is North"
-"Top 5 products by revenue"
-```
-
----
-
-## 🔧 Configuration
-
-### Environment Variables
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `STREAMLIT_SERVER_PORT` | Server port | 8501 |
-| `STREAMLIT_SERVER_HEADLESS` | Headless mode | true |
-| `MAX_UPLOAD_ROWS` | Maximum rows read from an uploaded file; larger files are truncated with a warning | 200000 |
-
-Uploads are limited to 50 MB via `server.maxUploadSize` in `.streamlit/config.toml`.
-
-### GLM-4.5-Flash for Ask Data (optional)
-
-Without an API key, Ask Data uses the built-in rule-based parser. With a Z.ai key, questions
-are interpreted by **GLM-4.5-Flash** (free, rate-limited), which handles freer phrasing.
-
-1. Create an API key at [z.ai](https://z.ai) (API keys page of the Z.ai open platform).
-2. Provide it as `ZAI_API_KEY`, either as an environment variable:
-
-   ```bash
-   export ZAI_API_KEY="your-key"
-   streamlit run app.py
-   ```
-
-   or in `.streamlit/secrets.toml` (already in `.gitignore`; on Streamlit Cloud use the app's
-   **Secrets** settings instead):
-
-   ```toml
-   ZAI_API_KEY = "your-key"
-   ```
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `ZAI_API_KEY` | Z.ai API key; enables GLM in Ask Data | not set |
+| Variable | Purpose | Default |
+|---|---|---|
+| `ZAI_API_KEY` | Enables GLM-4.5-Flash for Ask Data | not set (built-in parser) |
 | `ZAI_MODEL` | Model name | `glm-4.5-flash` |
-| `ZAI_BASE_URL` | API base URL. Keys from the GLM Coding Plan use `https://api.z.ai/api/coding/paas/v4` | `https://api.z.ai/api/paas/v4` |
+| `ZAI_BASE_URL` | API base URL (GLM Coding Plan keys use `https://api.z.ai/api/coding/paas/v4`) | `https://api.z.ai/api/paas/v4` |
+| `MAX_UPLOAD_ROWS` | Rows read from an upload; larger files are truncated with a warning | `200000` |
+| `ALLOWED_EMAIL_DOMAINS` / `ALLOWED_EMAILS` | Sign-in allow-lists (comma-separated) | not set |
 
-**How it works and what is sent.** The model only turns the question into a query plan (which
-columns, filters, grouping, aggregation); the app validates that plan against your columns and
-runs it with pandas, so the model never executes code. Z.ai receives the question plus column
-names, column types, up to 15 values per category column and the date range — **never the data
-rows**. If the key is missing, the API is unreachable or rate-limited, or the reply can't be used,
-the built-in parser answers and the app says so. A toggle in the Ask Data tab turns GLM off, and
-"How this was answered" shows the plan that ran.
+The same keys can go in `.streamlit/secrets.toml` (git-ignored) or Streamlit Cloud's Secrets settings.
 
-### Sign-in (optional)
+<details>
+<summary><b>Enabling sign-in (OIDC)</b></summary>
 
-The dashboard is open to anyone who can reach it unless sign-in is configured. It uses
-Streamlit's built-in OpenID Connect support, so any OIDC provider works (Google, Microsoft
-Entra ID, Auth0, Okta, ...). Add an `[auth]` section to `.streamlit/secrets.toml` (or the
-Secrets settings on Streamlit Cloud). Example for Google:
+Without configuration, anyone who can reach the app can use it. Add an `[auth]` section to `.streamlit/secrets.toml`, for example for Google:
 
 ```toml
 [auth]
-redirect_uri = "https://your-app-url/oauth2callback"   # http://localhost:8501/oauth2callback locally
-cookie_secret = "a-long-random-string"                  # e.g. python -c "import secrets; print(secrets.token_hex(32))"
+redirect_uri = "http://localhost:8501/oauth2callback"
+cookie_secret = "a-long-random-string"   # python -c "import secrets; print(secrets.token_hex(32))"
 client_id = "your-client-id.apps.googleusercontent.com"
 client_secret = "your-client-secret"
 server_metadata_url = "https://accounts.google.com/.well-known/openid-configuration"
 
-# Optional: limit who gets in (environment variables work too)
 ALLOWED_EMAIL_DOMAINS = "yourcompany.com"
-# ALLOWED_EMAILS = "ana@example.com,raj@example.com"
 ```
 
-With `[auth]` present, visitors see a sign-in page first; signed-in users see their email and a
-**Sign out** button in the sidebar. Without an allow-list, anyone who can sign in with the
-provider gets access, so set `ALLOWED_EMAIL_DOMAINS` or `ALLOWED_EMAILS` for private data.
-With Docker, mount the secrets file at runtime
-(`-v "$PWD/.streamlit/secrets.toml:/app/.streamlit/secrets.toml:ro"`); it is never copied into
-the image.
+Visitors then see a sign-in page first; signed-in users get a **Sign out** button. Without an allow-list anyone who can sign in with the provider gets access, so set one for private data. With Docker, mount the file at runtime: `-v "$PWD/.streamlit/secrets.toml:/app/.streamlit/secrets.toml:ro"`.
+</details>
 
-### Custom Theming
+## Testing
 
-Edit `.streamlit/config.toml`:
-
-```toml
-[theme]
-primaryColor = "#6366f1"      # Indigo
-backgroundColor = "#0f172a"    # Dark slate
-secondaryBackgroundColor = "#1e293b"
-textColor = "#f1f5f9"
+```bash
+pip install -r requirements-dev.txt
+ruff check .
+pytest
 ```
 
----
+The suite (140 tests) drives the real app headlessly with Streamlit's `AppTest` (sample data, Ask Data queries, forecasting, Data Tools, dashboards, sign-in) and unit-tests the query parser, LLM planner validation, dashboard import/export and data helpers. CI runs Ruff, pytest, and a Docker build that waits for the container to report healthy, on every push to `main` and every pull request.
 
-## 🤝 Contributing
+## Project structure
 
-1. Fork the repository
-2. Create feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit changes (`git commit -m 'Add amazing feature'`)
-4. Push to branch (`git push origin feature/amazing-feature`)
-5. Open Pull Request
+```
+├── app.py                 # Streamlit page: layout, tabs, session state, caching
+├── analytics/
+│   ├── data_utils.py      # Type detection, cleaning, quality score, sample data
+│   ├── preprocessing.py   # Data Tools (missing values, outliers, date features)
+│   ├── insights.py        # Automated insights and narratives
+│   ├── query_parser.py    # Question → intent (rule-based)
+│   ├── query_engine.py    # Executes intents with pandas, builds charts/answers
+│   ├── llm.py             # Optional GLM client and query-plan validation
+│   ├── forecasting.py     # Prophet forecasts and backtest
+│   ├── visualization.py   # Overview charts
+│   ├── dashboards.py      # Dashboard card export/import (JSON)
+│   ├── reports.py         # Markdown / HTML / CSV reports
+│   └── formatting.py      # HTML escaping and number formatting
+├── ui/                    # CSS, tutorial, OIDC sign-in gate
+├── semantic_engine.py     # Column profiling and semantic catalog
+├── tests/                 # AppTest smoke tests and unit tests
+├── docs/screenshots/      # README images
+├── .streamlit/config.toml # Theme and upload limit
+├── Dockerfile, Procfile
+├── requirements.txt       # Pinned runtime dependencies
+└── requirements-dev.txt   # pytest, ruff
+```
 
----
+## Limitations
 
-## 📄 License
+- Everything runs in memory in a single Streamlit process; it's meant for moderately sized files (uploads are capped at 50 MB and `MAX_UPLOAD_ROWS`), not as a data warehouse front end.
+- The rule-based Ask Data parser covers the query shapes listed above; free-form or multi-step questions need the optional GLM key, and even then answers are limited to what a single validated pandas plan can express.
+- "Insights" are statistical heuristics (correlation, IQR outliers, period-over-period change); they flag patterns, not causes.
+- Forecast quality depends entirely on your history; the backtest panel is there to show when a forecast is no better than a naive guess (as it is on the random sample data in the screenshot).
+- Saved dashboards are exported/imported as JSON files; there is no shared database or multi-user workspace.
 
-MIT License - feel free to use for personal and commercial projects.
+## License
 
----
+[MIT](LICENSE) © 2026 Akshat Banga
 
-## 🙏 Acknowledgments
+## Author
 
-- [Streamlit](https://streamlit.io) - App framework
-- [Prophet](https://facebook.github.io/prophet/) - Time series forecasting
-- [Plotly](https://plotly.com) - Interactive visualizations
-
----
-
-## 📞 Support
-
-- **Issues:** [GitHub Issues](https://github.com/yourusername/ai-analytics-dashboard/issues)
-- **Discussions:** [GitHub Discussions](https://github.com/yourusername/ai-analytics-dashboard/discussions)
-
----
-
-<p align="center">
-  <strong>Built with ❤️ as an open-source alternative to enterprise analytics tools</strong>
-</p>
+**Akshat Banga** · [github.com/Akshatb848](https://github.com/Akshatb848)

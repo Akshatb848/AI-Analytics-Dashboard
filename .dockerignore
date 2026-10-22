@@ -11,3 +11,6 @@ __pycache__
 .ruff_cache
 .ipynb_checkpoints
 .DS_Store
+
+# Docs and screenshots are not needed at runtime
+docs
